@@ -90,6 +90,12 @@ try:
 except ImportError:
     CompactionWorker = None  # type: ignore[assignment,misc]
 
+try:
+    from .adaptive import AdaptiveFitTracker, FitOutcome
+except ImportError:
+    AdaptiveFitTracker = None  # type: ignore[assignment,misc]
+    FitOutcome = None  # type: ignore[assignment,misc]
+
 
 logger = logging.getLogger("codeclub.proxy")
 
@@ -204,6 +210,13 @@ def create_app(
     if CompactionWorker is not None and store is not None:
         compaction_worker = CompactionWorker(store, check_interval_s=120.0)
         compaction_worker.start()
+
+    # Adaptive fit tracker (optional)
+    adaptive = None
+    if AdaptiveFitTracker is not None:
+        state_dir = Path(db_path).parent
+        adaptive = AdaptiveFitTracker(state_path=state_dir / "adaptive_fit.json")
+        logger.info("Adaptive fit tracking enabled")
 
     @app.on_event("shutdown")
     async def _shutdown():
@@ -320,8 +333,17 @@ def create_app(
         else:
             stats["uplifts_skipped"] += 1
 
-        # 5. Assemble context
+        # 5. Assemble context (with adaptive adjustment)
         budget = _model_budget(model)
+
+        # Apply adaptive padding adjustment if available
+        if adaptive is not None and fit is not None:
+            adj = adaptive.get_adjustment(
+                classification.intent.value, fit.value,
+            )
+            if adj != 0.0:
+                budget = int(budget * (1.0 + adj))
+                logger.debug("Adaptive adjustment: %+.0f%% → budget=%d", adj * 100, budget)
 
         assembled = _assemble(
             classification,
@@ -391,6 +413,7 @@ def create_app(
 
         # Index assistant response
         assistant_msg = ""
+        success = True
         choices = response_data.get("choices", [])
         if choices:
             assistant_msg = (
@@ -398,6 +421,30 @@ def create_app(
             )
         if assistant_msg and store is not None and ep_id is not None:
             store.add_turn(ep_id, "assistant", assistant_msg)
+
+        # Check for context-insufficient signals in the response
+        error_type = None
+        if response_data.get("error"):
+            success = False
+            error_type = "api_error"
+        elif assistant_msg and any(
+            phrase in assistant_msg.lower()
+            for phrase in ["i need to see", "could you share", "please provide",
+                           "i don't have enough context", "without seeing the"]
+        ):
+            success = False
+            error_type = "context_insufficient"
+
+        # Record adaptive outcome
+        if adaptive is not None and FitOutcome is not None and fit is not None:
+            adaptive.record(FitOutcome(
+                intent=classification.intent.value,
+                fit_level=fit.value,
+                context_tokens=assembled.total_tokens,
+                budget_tokens=budget,
+                success=success,
+                error_type=error_type,
+            ))
 
         return response_data
 
@@ -425,8 +472,10 @@ def create_app(
 
     @app.get("/v1/session/fit-stats")
     async def fit_stats():
-        """Per-intent analytics (placeholder)."""
-        return {"message": "not yet implemented"}
+        """Per-intent adaptive fit analytics."""
+        if adaptive is not None:
+            return adaptive.stats()
+        return {"message": "adaptive tracking not available"}
 
     @app.post("/v1/session/reset")
     async def reset_session():
