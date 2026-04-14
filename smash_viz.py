@@ -170,10 +170,11 @@ def render_single_png(
                 s=80, color=colour, edgecolors="white",
                 linewidths=1.2, zorder=8,
             )
+            label = f"{tid} ({coord.difficulty}d,{coord.clarity}c)"
             ax.annotate(
-                tid, (coord.difficulty, coord.clarity),
+                label, (coord.difficulty, coord.clarity),
                 xytext=(6, 6), textcoords="offset points",
-                fontsize=8, color="white", weight="bold",
+                fontsize=7, color="white", weight="bold",
                 bbox=dict(boxstyle="round,pad=0.2", facecolor="#000000", alpha=0.6),
             )
 
