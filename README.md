@@ -12,16 +12,23 @@ Three tools that compose. Use one, two, or all three.
 
 ## Caveman vs cloud
 
-Averaged across 3 tasks (RateLimiter, LRU Cache, Event Emitter). Real runs, real numbers.
+118 fights. 14 models. 8 tasks (Python + Rust, difficulty 8–55). Real runs, real numbers.
 
-| Backend | Avg time | Avg cost | vs GPT-5.4 | Quality |
+| Model | Pass Rate | Avg Time | Total Cost | Cost/Pass |
 |---|---|---|---|---|
-| **B580 local** (rnj-1 Q6_K) | 28.5s | **$0.000178** | 141× cheaper | 92% |
-| **Llama 70B** (OpenRouter free) | 15.9s | **$0.000057** | 439× cheaper | 100% |
-| **Gemma 4 26B** (OpenRouter free) | 42.2s | **$0.000141** | 178× cheaper | 83% |
-| GPT-5.4 (reference) | — | ~$0.025 | baseline | baseline |
+| **rnj-1:8b** (local 8B) | **75%** | 11.7s | **$0.00** | **FREE** |
+| **claude-sonnet-4** | **80%** | 6.5s | $0.07 | $0.008 |
+| **gpt-4.1** | **75%** | 6.3s | $0.03 | $0.006 |
+| **deepseek-v3.1** | **75%** | 29.3s | $0.004 | $0.0007 |
+| **codestral-2508** | 62% | **3.0s** | $0.003 | $0.0007 |
+| gpt-4.1-nano | 50% | 5.7s | $0.002 | $0.0004 |
+| devstral-small | 38% | **2.7s** | $0.001 | $0.0004 |
+| gemini-2.5-pro | 12% | 34.1s | **$0.25** | **$0.25** |
 
 Caveman pay electricity. Cloud pay rent. Electricity cheaper.
+
+<img src="benchmarks/maps/quality_vs_cost.png" alt="Quality vs Cost" width="700">
+<img src="benchmarks/maps/efficiency_scatter.png" alt="Efficiency Map" width="700">
 
 ### Compression savings (real files)
 
@@ -150,6 +157,10 @@ Roles aren't special code paths — they're just coordinates on this plane:
 | `review` | −5 | 75 | Check existing code. Moderate. |
 
 ### Efficiency maps
+
+**Quality matrix** — 14 models × 8 tasks. Green=100%, red=0%. The full picture.
+
+<img src="benchmarks/maps/quality_matrix.png" alt="Quality matrix heatmap" width="700">
 
 <table>
 <tr>
