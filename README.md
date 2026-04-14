@@ -27,8 +27,8 @@ Three tools that compose. Use one, two, or all three.
 
 Caveman pay electricity. Cloud pay rent. Electricity cheaper.
 
-<img src="benchmarks/maps/quality_vs_cost.png" alt="Quality vs Cost" width="700">
-<img src="benchmarks/maps/efficiency_scatter.png" alt="Efficiency Map" width="700">
+![Quality vs Cost](benchmarks/maps/quality_vs_cost.png)
+![Efficiency Map](benchmarks/maps/efficiency_scatter.png)
 
 ### Compression savings (real files)
 
@@ -48,9 +48,9 @@ git clone https://github.com/ozmalabs/codeclub && cd codeclub
 uv sync
 uv run pytest tests/
 
-# Hit task with club
+# Hit task with club (use any setup — local_gpu, copilot, anthropic, etc.)
 uv run python dev_loop.py "Build a rate limiter with token bucket algorithm" \
-    --setup local_b580 \
+    --setup local_gpu \
     --max-iterations 3 \
     --output rate_limiter.py
 ```
@@ -83,8 +83,9 @@ models you have.
 from codeclub.dev import run
 from codeclub.infra.models import router_for_setup
 
+# Use whatever you have — local GPU, cloud API, or both
 result = run("Build a RateLimiter class with token bucket algorithm",
-             router=router_for_setup("local_b580"))
+             router=router_for_setup("local_gpu"))
 ```
 
 Big model designs the skeleton. Small model fills each function in parallel
@@ -99,7 +100,7 @@ right patterns — no hallucinated imports, no outdated APIs.
 ```bash
 # Auto-detects "cli" stack from task keywords
 uv run python dev_loop.py "Build a CLI tool that manages nvmeof devices" \
-    --setup local_b580
+    --setup local_gpu
 
 # Or specify explicitly
 uv run python dev_loop.py "Build a REST API for user management" \
@@ -121,26 +122,30 @@ task would have cost on GPT-4o. Pass `--electricity-rate 0.28` if you're in the 
 
 > You tell codeclub what you have. It hits the task with a club until it fits.
 
-The router tries the best quality quant first. Doesn't fit in VRAM? Steps down
-through Q6_K → Q4_K_M → Q3_K_M. Nothing fits on GPU? Falls back to CPU. No
-internet? No problem.
+Define your hardware once. The router picks models that fit. Got a GPU? It tries
+the best quality quant first. Doesn't fit in VRAM? Steps down through
+Q6_K → Q4_K_M → Q3_K_M. Nothing fits on GPU? Falls back to CPU. No internet?
+No problem.
+
+Example setups (or define your own):
 
 | Setup | What |
 |---|---|
 | `local_only` | Ollama CPU, no internet |
-| `local_b580` | B580 SYCL for map/review, Ollama CPU for fill |
+| `local_gpu` | GPU for map/review, CPU for fill (any GPU — B580, 3060, 4090, etc.) |
 | `copilot` | GitHub Copilot SDK (free) |
 | `anthropic` | Direct Anthropic API |
 | `openrouter_cheap` | Paid OpenRouter < $0.002/call |
 | `best_local_first` | Local preferred, cloud fallback |
 
-Six providers. Zero config for local, one env var for cloud.
+Six providers. Zero config for local, one env var for cloud. Hardware-aware —
+the router knows your VRAM, your model sizes, your quant levels.
 
 → [How routing works](docs/routing.md)
 
 ## Club Smash — right-sizing models to tasks
 
-> You don't use a sledgehammer to crack a nut. Club Smash finds the right club.
+> You don't use a sledgehammer to crack a nut. Club Smash find right club.
 
 Every model has an efficiency map — like a turbo compressor map. Two axes:
 **difficulty** (how hard) and **clarity** (how well-specified). The sweet spot
@@ -160,31 +165,24 @@ Roles aren't special code paths — they're just coordinates on this plane:
 
 **Quality matrix** — 14 models × 8 tasks. Green=100%, red=0%. The full picture.
 
-<img src="benchmarks/maps/quality_matrix.png" alt="Quality matrix heatmap" width="700">
+![Quality matrix heatmap](benchmarks/maps/quality_matrix.png)
 
-<table>
-<tr>
-<td width="50%">
-<strong>rnj-1:8b</strong> (8B, Q6_K, B580 GPU)<br>
-Tight island around 35d. Nails easy-moderate tasks with clear specs.<br>
-<img src="benchmarks/maps/rnj-1-8b.png" alt="rnj-1:8b efficiency map" width="100%">
-</td>
-<td width="50%">
-<strong>qwen3-coder:30b</strong> (30B, Q4_K_M, CPU)<br>
-Wide plateau. Handles ambiguity, covers most of the task space.<br>
-<img src="benchmarks/maps/qwen3-coder-30b.png" alt="qwen3-coder:30b efficiency map" width="100%">
-</td>
-</tr>
-</table>
+**rnj-1:8b** (8B, Q6_K, B580 GPU) — Tight island around 35d. Nails easy-moderate tasks with clear specs.
+
+![rnj-1:8b efficiency map](benchmarks/maps/rnj-1-8b.png)
+
+**qwen3-coder:30b** (30B, Q4_K_M, CPU) — Wide plateau. Handles ambiguity, covers most of the task space.
+
+![qwen3-coder:30b efficiency map](benchmarks/maps/qwen3-coder-30b.png)
 
 **Model overlay** — all models on one chart. Find the gaps, find the overlaps.
 
-<img src="benchmarks/maps/overlay.png" alt="Model efficiency overlay" width="700">
+![Model efficiency overlay](benchmarks/maps/overlay.png)
 
 **Quantization comparison** — same model, different quants. See how much
 capability you lose stepping down from bf16 → Q4_K_M → Q2_K.
 
-<img src="benchmarks/maps/quant_gemma4-26b-a4b.png" alt="Gemma4 quantization comparison" width="700">
+![Gemma4 quantization comparison](benchmarks/maps/quant_gemma4-26b-a4b.png)
 
 ```bash
 python smash_viz.py                           # generate all maps
@@ -239,10 +237,10 @@ pip install codeclub-infra    # routing only
 
 ## Star This Repo
 
-If caveman save you mass token, mass money — leave mass star. ⭐
+If caveclub save you mass token, mass money — leave mass star. ⭐
 
 [![Star History Chart](https://api.star-history.com/svg?repos=ozmalabs/codeclub&type=Date)](https://star-history.com/#ozmalabs/codeclub&Date)
 
 ---
 
-Brought to you by [Ozma](https://ozmalabs.com) from [ozmalabs.com](https://ozmalabs.com).
+Brought to you by Ozma from [ozmalabs.com](https://ozmalabs.com).
