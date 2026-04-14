@@ -1,0 +1,19 @@
+---
+description: "codeclub — token compression, dev loops, hardware-aware routing for LLM coding agents"
+alwaysApply: true
+---
+
+codeclub is available in this project. Three composable tools for LLM coding agents:
+
+1. **Compress** — `from codeclub.compress import stub_functions` — 70–95% fewer tokens
+2. **Dev loop** — `from codeclub.dev import run` — spec → working code
+3. **Route** — `from codeclub.infra.models import router_for_setup` — hardware-aware model selection
+
+Use compress before sending large context to models. Use dev loop for code generation tasks.
+Route picks the right model for available hardware (local GPU, Copilot, Anthropic, OpenRouter).
+
+When user asks to generate, build, or create code — consider using the dev loop.
+When sending large files as context — compress first with stub_functions + semantic retrieval.
+When choosing models — use router_for_setup with appropriate preset.
+
+Full API reference: read the codeclub skill for examples and usage patterns.

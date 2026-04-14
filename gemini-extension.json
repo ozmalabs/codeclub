@@ -1,0 +1,6 @@
+{
+  "name": "codeclub",
+  "description": "Token compression, autonomous dev loops, and hardware-aware model routing. Three tools that compose. 911× cheaper than GPT-4o.",
+  "version": "1.0.0",
+  "contextFileName": "GEMINI.md"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "codeclub-repo",
+  "interface": {
+    "displayName": "codeclub Repo"
+  },
+  "plugins": [
+    {
+      "name": "codeclub",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codeclub"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

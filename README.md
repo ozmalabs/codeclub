@@ -14,12 +14,12 @@ Three tools that compose. Use one, two, or all three.
 
 Averaged across 3 tasks (RateLimiter, LRU Cache, Event Emitter). Real runs, real numbers.
 
-| Backend | Avg time | Avg cost | vs GPT-4o | Quality |
+| Backend | Avg time | Avg cost | vs GPT-5.4 | Quality |
 |---|---|---|---|---|
-| **B580 local** (rnj-1 Q6_K) | 28.5s | **$0.000178** | 96× cheaper | 92% |
-| **Llama 70B** (OpenRouter free) | 15.9s | **$0.000057** | 173× cheaper | 100% |
-| **Gemma 4 26B** (OpenRouter free) | 42.2s | **$0.000141** | 141× cheaper | 83% |
-| GPT-4o (reference) | — | ~$0.017 | baseline | baseline |
+| **B580 local** (rnj-1 Q6_K) | 28.5s | **$0.000178** | 141× cheaper | 92% |
+| **Llama 70B** (OpenRouter free) | 15.9s | **$0.000057** | 439× cheaper | 100% |
+| **Gemma 4 26B** (OpenRouter free) | 42.2s | **$0.000141** | 178× cheaper | 83% |
+| GPT-5.4 (reference) | — | ~$0.025 | baseline | baseline |
 
 Caveman pay electricity. Cloud pay rent. Electricity cheaper.
 

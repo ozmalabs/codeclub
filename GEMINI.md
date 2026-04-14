@@ -1,0 +1,1 @@
+@./skills/codeclub/SKILL.md

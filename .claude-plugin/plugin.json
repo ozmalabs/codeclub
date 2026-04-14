@@ -1,0 +1,22 @@
+{
+  "name": "codeclub",
+  "description": "Token compression, autonomous dev loops, and hardware-aware model routing for LLM coding agents. 911× cheaper than GPT-4o.",
+  "author": {
+    "name": "codeclub",
+    "url": "https://github.com/ozmalabs/codeclub"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat ${CLAUDE_PLUGIN_ROOT}/rules/codeclub-activate.md",
+            "timeout": 5,
+            "statusMessage": "Loading codeclub tools..."
+          }
+        ]
+      }
+    ]
+  }
+}

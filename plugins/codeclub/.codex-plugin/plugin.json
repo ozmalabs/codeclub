@@ -1,0 +1,38 @@
+{
+  "name": "codeclub",
+  "version": "0.1.0",
+  "description": "Token compression, dev loops, hardware-aware routing for LLM coding agents.",
+  "author": {
+    "name": "codeclub",
+    "url": "https://github.com/ozmalabs/codeclub"
+  },
+  "homepage": "https://github.com/ozmalabs/codeclub",
+  "repository": "https://github.com/ozmalabs/codeclub",
+  "license": "MIT",
+  "keywords": [
+    "compression",
+    "dev-loop",
+    "routing",
+    "llm",
+    "productivity"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "codeclub",
+    "shortDescription": "Compress context, generate code, route to right model.",
+    "longDescription": "Three composable tools for LLM coding agents: token compression (70-95% reduction), autonomous dev loops (spec → working code), and hardware-aware model routing (911× cheaper than GPT-4o).",
+    "developerName": "codeclub",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "websiteURL": "https://github.com/ozmalabs/codeclub",
+    "privacyPolicyURL": "https://github.com/ozmalabs/codeclub/blob/main/README.md",
+    "termsOfServiceURL": "https://github.com/ozmalabs/codeclub/blob/main/LICENSE",
+    "defaultPrompt": [
+      "Use codeclub for compression, dev loops, and model routing."
+    ],
+    "screenshots": [],
+    "brandColor": "#4B5563"
+  }
+}

@@ -91,7 +91,7 @@ B580 is 2.5× faster than cloud for this task, at zero cost.
 
 Every run produces a ledger: wallclock, tokens, energy (measured from hardware
 counters where available, TDP estimate otherwise), API cost, and a comparison
-against what the same task would have cost on GPT-4o.
+against what the same task would have cost on GPT-5.4.
 
 ```
   ┌─ Accounting ──────────────────────────────────────────────
@@ -102,9 +102,9 @@ against what the same task would have cost on GPT-4o.
   │  Total $     $0.000035
   ├─ Cost comparison ─────────────────────────────────────────
   │  Actual cost      $0.000035
-  │  vs gpt-4o                 $0.031900  (911× more)
+  │  vs gpt-5.4                 $0.031900  (911× more)
   │  vs claude-opus-4-6        $0.038250
-  │  vs gpt-4o-mini            $0.000808  (23× more)
+  │  vs gpt-5-mini            $0.000808  (23× more)
   └───────────────────────────────────────────────────────────
 ```
 

@@ -4,7 +4,7 @@ models.py — Model registry, capability matrix, and routing.
 Model selection is a lookup problem, not an LLM problem. Given:
   - task complexity (trivial → expert)
   - pipeline phase (spec / map / fill / testgen / review / report)
-  - available providers (anthropic / openrouter / ollama / llama-server)
+  - available providers (anthropic / copilot-sdk / github / openrouter / ollama / llama-server)
   - budget constraint (free / cheap / medium / premium)
   - observed failure history (auto-escalate after N failures)
 
@@ -100,7 +100,7 @@ class ModelSpec:
     """Full specification for a single model."""
     id: str                          # Canonical ID (Ollama tag or OpenRouter model ID)
     name: str                        # Display name
-    provider: str                    # "anthropic" | "openrouter" | "ollama" | "llama-server"
+    provider: str                    # "anthropic" | "copilot-sdk" | "github" | "openrouter" | "ollama" | "llama-server"
     family: str                      # "gemma" | "llama" | "qwen" | "claude" | "rnj" | ...
 
     # Cost (USD per million tokens; 0 for local)
@@ -190,6 +190,15 @@ REGISTRY: list[ModelSpec] = [
         id="claude-sonnet-4-6", name="Claude Sonnet 4.6",
         provider="anthropic", family="claude",
         cost_in=3.00, cost_out=15.00, context=200_000,
+        swe_bench=0.72, human_eval=0.93,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"anthropic", "cloud", "medium"}),
+    ),
+    ModelSpec(
+        id="claude-sonnet-4-5", name="Claude Sonnet 4.5",
+        provider="anthropic", family="claude",
+        cost_in=3.00, cost_out=15.00, context=200_000,
         swe_bench=0.65, human_eval=0.93,
         phases=frozenset(PHASES),
         max_complexity="complex",
@@ -205,7 +214,110 @@ REGISTRY: list[ModelSpec] = [
         tags=frozenset({"anthropic", "cloud", "cheap"}),
     ),
 
-    # ── Cloud: OpenRouter (paid) ───────────────────────────────────────────
+    # ── Cloud: OpenRouter (GPT-5 family) ──────────────────────────────────
+    ModelSpec(
+        id="openai/gpt-5.4", name="GPT-5.4",
+        provider="openrouter", family="gpt",
+        cost_in=2.50, cost_out=15.00, context=1_000_000,
+        swe_bench=0.78, human_eval=0.98,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"openrouter", "cloud", "medium", "long-context"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-5.3-codex", name="GPT-5.3 Codex",
+        provider="openrouter", family="gpt",
+        cost_in=1.75, cost_out=14.00, context=400_000,
+        swe_bench=0.76, human_eval=0.97,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"openrouter", "cloud", "medium"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-5.2-codex", name="GPT-5.2 Codex",
+        provider="openrouter", family="gpt",
+        cost_in=1.75, cost_out=14.00, context=400_000,
+        swe_bench=0.74, human_eval=0.96,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"openrouter", "cloud", "medium"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-5", name="GPT-5",
+        provider="openrouter", family="gpt",
+        cost_in=1.25, cost_out=10.00, context=400_000,
+        swe_bench=0.74, human_eval=0.97,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"openrouter", "cloud", "medium"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-5-mini", name="GPT-5 Mini",
+        provider="openrouter", family="gpt",
+        cost_in=0.25, cost_out=2.00, context=400_000,
+        swe_bench=0.55, human_eval=0.92,
+        phases=frozenset(PHASES),
+        max_complexity="complex",
+        tags=frozenset({"openrouter", "cloud", "cheap"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-5-nano", name="GPT-5 Nano",
+        provider="openrouter", family="gpt",
+        cost_in=0.05, cost_out=0.40, context=400_000,
+        swe_bench=0.38, human_eval=0.85,
+        phases=frozenset({"fill", "testgen", "report", "spec"}),
+        max_complexity="moderate",
+        tags=frozenset({"openrouter", "cloud", "cheap"}),
+    ),
+
+    # ── Cloud: OpenRouter (GPT-4 family) ──────────────────────────────────
+    ModelSpec(
+        id="openai/gpt-4.1", name="GPT-4.1",
+        provider="openrouter", family="gpt",
+        cost_in=2.00, cost_out=8.00, context=1_000_000,
+        swe_bench=0.55, human_eval=0.90,
+        phases=frozenset(PHASES),
+        max_complexity="complex",
+        tags=frozenset({"openrouter", "cloud", "medium", "long-context"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-4.1-mini", name="GPT-4.1 Mini",
+        provider="openrouter", family="gpt",
+        cost_in=0.40, cost_out=1.60, context=1_000_000,
+        swe_bench=0.50, human_eval=0.90,
+        phases=frozenset({"spec", "map", "testgen", "review", "report"}),
+        max_complexity="complex",
+        tags=frozenset({"openrouter", "cloud", "cheap", "long-context"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-4.1-nano", name="GPT-4.1 Nano",
+        provider="openrouter", family="gpt",
+        cost_in=0.10, cost_out=0.40, context=1_000_000,
+        swe_bench=0.36, human_eval=0.82,
+        phases=frozenset({"fill", "testgen", "report"}),
+        max_complexity="moderate",
+        tags=frozenset({"openrouter", "cloud", "cheap", "long-context"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-4o", name="GPT-4o",
+        provider="openrouter", family="gpt",
+        cost_in=2.50, cost_out=10.00, context=128_000,
+        swe_bench=0.49, human_eval=0.90,
+        phases=frozenset(PHASES),
+        max_complexity="complex",
+        tags=frozenset({"openrouter", "cloud", "medium"}),
+    ),
+    ModelSpec(
+        id="openai/gpt-4o-mini", name="GPT-4o Mini",
+        provider="openrouter", family="gpt",
+        cost_in=0.15, cost_out=0.60, context=128_000,
+        swe_bench=0.43, human_eval=0.87,
+        phases=frozenset({"spec", "map", "testgen", "review", "report"}),
+        max_complexity="moderate",
+        tags=frozenset({"openrouter", "cloud", "cheap"}),
+    ),
+
+    # ── Cloud: OpenRouter (Llama / Gemma / DeepSeek / others) ─────────────
     ModelSpec(
         id="meta-llama/llama-3.3-70b-instruct", name="Llama 3.3 70B",
         provider="openrouter", family="llama",
@@ -219,8 +331,7 @@ REGISTRY: list[ModelSpec] = [
         id="google/gemma-4-31b-it", name="Gemma 4 31B",
         provider="openrouter", family="gemma",
         cost_in=0.13, cost_out=0.38, context=262_144,
-        swe_bench=0.48,  # * estimated; Gemma 4 family strong on code
-        human_eval=0.87, # * estimated
+        swe_bench=0.48, human_eval=0.87,
         phases=frozenset({"spec", "map", "testgen", "review", "report"}),
         max_complexity="complex",
         tags=frozenset({"openrouter", "cloud", "cheap"}),
@@ -229,37 +340,34 @@ REGISTRY: list[ModelSpec] = [
         id="google/gemma-4-26b-a4b-it", name="Gemma 4 26B MoE",
         provider="openrouter", family="gemma",
         cost_in=0.08, cost_out=0.35, context=262_144,
-        swe_bench=0.42,  # * MoE: strong knowledge, moderate reasoning
-        human_eval=0.83, # * estimated
+        swe_bench=0.42, human_eval=0.83,
         phases=frozenset({"spec", "map", "testgen", "review", "report"}),
         max_complexity="moderate",
         tags=frozenset({"openrouter", "cloud", "cheap"}),
     ),
     ModelSpec(
-        id="openai/gpt-4o-mini", name="GPT-4o Mini",
-        provider="openrouter", family="gpt",
-        cost_in=0.15, cost_out=0.60, context=128_000,
-        swe_bench=0.43, human_eval=0.87,
-        phases=frozenset({"spec", "map", "testgen", "review", "report"}),
-        max_complexity="moderate",
-        tags=frozenset({"openrouter", "cloud", "cheap", "copilot"}),
+        id="deepseek/deepseek-chat-v3-0324", name="DeepSeek v3.1",
+        provider="openrouter", family="deepseek",
+        cost_in=0.15, cost_out=0.75, context=128_000,
+        swe_bench=0.52, human_eval=0.90,
+        phases=frozenset(PHASES),
+        max_complexity="complex",
+        tags=frozenset({"openrouter", "cloud", "cheap"}),
     ),
     ModelSpec(
-        id="openai/gpt-4.1-mini", name="GPT-4.1 Mini",
-        provider="openrouter", family="gpt",
-        cost_in=0.40, cost_out=1.60, context=128_000,
-        swe_bench=0.50,  # * 4.1 family improvement over 4o
-        human_eval=0.90, # * estimated
-        phases=frozenset({"spec", "map", "testgen", "review", "report"}),
-        max_complexity="complex",
-        tags=frozenset({"openrouter", "cloud", "medium", "copilot"}),
+        id="deepseek/deepseek-r1", name="DeepSeek R1",
+        provider="openrouter", family="deepseek",
+        cost_in=0.70, cost_out=2.50, context=128_000,
+        swe_bench=0.57, human_eval=0.92,
+        phases=frozenset({"spec", "map", "review"}),
+        max_complexity="expert",
+        tags=frozenset({"openrouter", "cloud", "cheap", "reasoning"}),
     ),
     ModelSpec(
         id="mistralai/mistral-small-3.1-24b-instruct", name="Mistral Small 3.1 24B",
         provider="openrouter", family="mistral",
         cost_in=0.35, cost_out=0.56, context=128_000,
-        swe_bench=0.38, # * Mistral Small is capable but not SWE-focused
-        human_eval=0.82,
+        swe_bench=0.38, human_eval=0.82,
         phases=frozenset({"map", "testgen", "review", "report"}),
         max_complexity="moderate",
         tags=frozenset({"openrouter", "cloud", "cheap"}),
@@ -276,23 +384,33 @@ REGISTRY: list[ModelSpec] = [
 
     # ── Cloud: MiniMax ────────────────────────────────────────────────────
     ModelSpec(
-        id="minimax/minimax-m1", name="MiniMax M1 (2.7)",
+        id="minimax/minimax-m2.5", name="MiniMax M2.5",
         provider="openrouter", family="minimax",
-        cost_in=0.30, cost_out=1.10, context=1_000_000,
-        swe_bench=0.56,   # * strong reasoning model, comparable to GPT-4.1-mini+
-        human_eval=0.90,  # * estimated from MiniMax-01 benchmark reports
+        cost_in=0.30, cost_out=1.10, context=196_000,
+        swe_bench=0.58, human_eval=0.91,
         phases=frozenset({"spec", "map", "testgen", "review", "report"}),
         max_complexity="complex",
         tags=frozenset({"openrouter", "cloud", "cheap", "long-context"}),
     ),
     ModelSpec(
-        id="minimax/minimax-m1:free", name="MiniMax M1 (free)",
+        id="minimax/minimax-m2.5:free", name="MiniMax M2.5 (free)",
         provider="openrouter", family="minimax",
-        cost_in=0.0, cost_out=0.0, context=1_000_000,
-        swe_bench=0.56, human_eval=0.90,
+        cost_in=0.0, cost_out=0.0, context=196_000,
+        swe_bench=0.58, human_eval=0.91,
         phases=frozenset({"spec", "map", "testgen", "review", "report"}),
         max_complexity="complex",
         tags=frozenset({"openrouter", "cloud", "free", "long-context"}),
+    ),
+
+    # ── Cloud: OpenRouter (Qwen free) ─────────────────────────────────────
+    ModelSpec(
+        id="qwen/qwen3-coder:free", name="Qwen3-Coder (free)",
+        provider="openrouter", family="qwen",
+        cost_in=0.0, cost_out=0.0, context=262_144,
+        swe_bench=0.50, human_eval=0.88,
+        phases=frozenset({"spec", "map", "fill", "testgen", "review"}),
+        max_complexity="complex",
+        tags=frozenset({"openrouter", "cloud", "free"}),
     ),
 
     # ── Cloud: OpenRouter (free tier) ─────────────────────────────────────
@@ -315,13 +433,40 @@ REGISTRY: list[ModelSpec] = [
         tags=frozenset({"openrouter", "cloud", "free"}),
     ),
 
-    # ── GitHub Models / Copilot (inference.ai.azure.com) ─────────────────
+    # ── GitHub Models (inference.ai.azure.com) ────────────────────────────
+    ModelSpec(
+        id="gpt-5.4", name="GPT-5.4 (GitHub Models)",
+        provider="github", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=1_000_000,
+        swe_bench=0.78, human_eval=0.98,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"github", "cloud", "free", "copilot", "long-context"}),
+    ),
+    ModelSpec(
+        id="gpt-5", name="GPT-5 (GitHub Models)",
+        provider="github", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=400_000,
+        swe_bench=0.74, human_eval=0.97,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"github", "cloud", "free", "copilot"}),
+    ),
+    ModelSpec(
+        id="gpt-4.1", name="GPT-4.1 (GitHub Models)",
+        provider="github", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=1_000_000,
+        swe_bench=0.55, human_eval=0.90,
+        phases=frozenset(PHASES),
+        max_complexity="complex",
+        tags=frozenset({"github", "cloud", "free", "copilot", "long-context"}),
+    ),
     ModelSpec(
         id="gpt-4o", name="GPT-4o (GitHub Models)",
         provider="github", family="gpt",
-        cost_in=0.0, cost_out=0.0, context=128_000,  # free via GitHub token (rate-limited)
+        cost_in=0.0, cost_out=0.0, context=128_000,
         swe_bench=0.49, human_eval=0.90,
-        phases=frozenset(PHASES),  # capable of all phases
+        phases=frozenset(PHASES),
         max_complexity="complex",
         tags=frozenset({"github", "cloud", "free", "copilot"}),
     ),
@@ -344,6 +489,15 @@ REGISTRY: list[ModelSpec] = [
         tags=frozenset({"github", "cloud", "free", "copilot", "reasoning"}),
     ),
     ModelSpec(
+        id="o4-mini", name="o4-mini (GitHub Models)",
+        provider="github", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=200_000,
+        swe_bench=0.70, human_eval=0.97,
+        phases=frozenset({"spec", "map", "testgen", "review"}),
+        max_complexity="expert",
+        tags=frozenset({"github", "cloud", "free", "copilot", "reasoning"}),
+    ),
+    ModelSpec(
         id="Llama-3.3-70B-Instruct", name="Llama 3.3 70B (GitHub Models)",
         provider="github", family="llama",
         cost_in=0.0, cost_out=0.0, context=131_072,
@@ -351,6 +505,53 @@ REGISTRY: list[ModelSpec] = [
         phases=frozenset({"spec", "map", "testgen", "review", "report"}),
         max_complexity="complex",
         tags=frozenset({"github", "cloud", "free"}),
+    ),
+
+    # ── GitHub Copilot SDK (local Copilot CLI via JSON-RPC) ────────────────
+    ModelSpec(
+        id="copilot:gpt-5.4", name="GPT-5.4 (Copilot SDK)",
+        provider="copilot-sdk", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=1_000_000,
+        swe_bench=0.78, human_eval=0.98,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"copilot-sdk", "cloud", "free", "copilot", "long-context"}),
+    ),
+    ModelSpec(
+        id="copilot:gpt-5", name="GPT-5 (Copilot SDK)",
+        provider="copilot-sdk", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=400_000,
+        swe_bench=0.74, human_eval=0.97,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"copilot-sdk", "cloud", "free", "copilot"}),
+    ),
+    ModelSpec(
+        id="copilot:claude-sonnet-4.6", name="Claude Sonnet 4.6 (Copilot SDK)",
+        provider="copilot-sdk", family="claude",
+        cost_in=0.0, cost_out=0.0, context=200_000,
+        swe_bench=0.72, human_eval=0.93,
+        phases=frozenset(PHASES),
+        max_complexity="expert",
+        tags=frozenset({"copilot-sdk", "cloud", "free", "copilot"}),
+    ),
+    ModelSpec(
+        id="copilot:claude-sonnet-4.5", name="Claude Sonnet 4.5 (Copilot SDK)",
+        provider="copilot-sdk", family="claude",
+        cost_in=0.0, cost_out=0.0, context=200_000,
+        swe_bench=0.65, human_eval=0.93,
+        phases=frozenset(PHASES),
+        max_complexity="complex",
+        tags=frozenset({"copilot-sdk", "cloud", "free", "copilot"}),
+    ),
+    ModelSpec(
+        id="copilot:o4-mini", name="o4-mini (Copilot SDK)",
+        provider="copilot-sdk", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=200_000,
+        swe_bench=0.70, human_eval=0.97,
+        phases=frozenset({"spec", "map", "testgen", "review"}),
+        max_complexity="expert",
+        tags=frozenset({"copilot-sdk", "cloud", "free", "copilot", "reasoning"}),
     ),
 
     # ── Local: B580 SYCL (llama-server port 8081) ─────────────────────────
@@ -882,7 +1083,7 @@ def router_for_setup(setup: str, hardware: "HardwareSetup | None" = None, **kwar
       "openrouter_free"  — Free tier only (rate-limited, use sparingly)
       "openrouter_cheap" — Paid but cheap (< $0.002 per call)
       "anthropic"        — Anthropic API only
-      "copilot"          — GitHub Copilot models (GPT family)
+      "copilot"          — GitHub Copilot SDK via local Copilot CLI
       "best_local_first" — Prefer local, cloud fallback for hard phases
     """
     presets: dict[str, dict] = {
@@ -907,9 +1108,8 @@ def router_for_setup(setup: str, hardware: "HardwareSetup | None" = None, **kwar
             budget="medium", prefer_local=False,
         ),
         "copilot": dict(
-            available_providers={"openrouter"},
-            budget="medium", prefer_local=False,
-            # Could filter by tags={"copilot"} if needed
+            available_providers={"copilot-sdk"},
+            budget="free", prefer_local=False,
         ),
         "github": dict(
             available_providers={"github"},

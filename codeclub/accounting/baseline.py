@@ -6,15 +6,15 @@ Answers: "what would this task have cost without codeclub?"
 Two dimensions of savings:
   1. Compression savings — fewer tokens sent because context was compressed.
      Baseline: sending full uncompressed files.
-  2. Model savings — using local/cheap models instead of GPT-4o/Claude Opus.
+  2. Model savings — using local/cheap models instead of GPT-5.4/Claude Sonnet 4.6.
      Baseline: running the same task on a premium cloud model.
 
 These are independent. You can have both, either, or neither.
 
 Example output:
   Actual cost:       $0.00003  (local B580, energy only)
-  vs GPT-4o:         $0.1840   (6,134× more expensive)
-  vs Claude Opus:    $0.2201
+  vs GPT-5.4:        $0.1125   (3,750× more expensive)
+  vs Sonnet 4.6:     $0.1050
   vs uncompressed:   $0.0024   (80× more, same model)
   Compression ratio: 94.2%
   Tokens saved:      12,400
@@ -35,19 +35,21 @@ from .tracker import TaskLedger
 
 BASELINE_MODELS: dict[str, tuple[float, float]] = {
     # model_id → (cost_in_per_M, cost_out_per_M)
-    "gpt-4o":              (5.00,  15.00),
+    "gpt-5.4":             (2.50,  15.00),
+    "gpt-5.3-codex":       (1.75,  14.00),
+    "gpt-5":               (1.25,  10.00),
+    "gpt-5-mini":          (0.25,   2.00),
     "gpt-4.1":             (2.00,   8.00),
-    "gpt-4o-mini":         (0.15,   0.60),
+    "gpt-4o":              (2.50,  10.00),
     "claude-opus-4-6":     (5.00,  25.00),
     "claude-sonnet-4-6":   (3.00,  15.00),
     "claude-haiku-4-5":    (1.00,   5.00),
-    "gemini-2.5-pro":      (1.25,  10.00),
+    "deepseek-v3.1":       (0.15,   0.75),
     "llama-3.3-70b":       (0.10,   0.32),
-    "o3-mini":             (1.10,   4.40),
 }
 
 # Default reference for "what would this have cost on a premium model"
-DEFAULT_REFERENCE_MODEL = "gpt-4o"
+DEFAULT_REFERENCE_MODEL = "gpt-5.4"
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +100,7 @@ class SavingsReport:
         show = (
             list(BASELINE_MODELS.keys())
             if include_all
-            else [DEFAULT_REFERENCE_MODEL, "claude-opus-4-6", "gpt-4o-mini"]
+            else [DEFAULT_REFERENCE_MODEL, "claude-sonnet-4-6", "gpt-5-mini"]
         )
         for model in show:
             ref = self.reference_costs.get(model)

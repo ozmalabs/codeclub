@@ -384,7 +384,9 @@ def make_call_fn(
     elif model.provider == "anthropic":
         return make_anthropic_fn(model.id, max_tokens=max_tokens, temperature=temperature)
     elif model.provider == "copilot-sdk":
-        return make_copilot_sdk_fn(model.id, cwd=os.getcwd(), max_tokens=max_tokens, temperature=temperature)
+        # Strip "copilot:" prefix — SDK uses bare model IDs
+        sdk_model_id = model.id.removeprefix("copilot:")
+        return make_copilot_sdk_fn(sdk_model_id, cwd=os.getcwd(), max_tokens=max_tokens, temperature=temperature)
     elif model.provider == "github":
         return make_github_models_fn(model.id, max_tokens=max_tokens, temperature=temperature)
     else:

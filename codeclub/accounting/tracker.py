@@ -30,7 +30,7 @@ class PhaseRecord:
     """One inference phase within a task run."""
     phase: str              # "spec" | "map" | "fill" | "testgen" | "review" | "report"
     model_id: str
-    provider: str           # "openrouter" | "ollama" | "llama-server" | "anthropic" | "github"
+    provider: str           # "openrouter" | "ollama" | "llama-server" | "anthropic" | "copilot-sdk" | "github"
 
     tokens_in:  int = 0
     tokens_out: int = 0

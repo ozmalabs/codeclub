@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "codeclub",
+  "description": "Token compression, autonomous dev loops, and hardware-aware model routing for LLM coding agents. Three tools that compose. 911× cheaper than GPT-4o.",
+  "owner": {
+    "name": "codeclub",
+    "url": "https://github.com/ozmalabs/codeclub"
+  },
+  "plugins": [
+    {
+      "name": "codeclub",
+      "description": "Compress context, generate code, route to right model. Caveman not have H100. Caveman only have club.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
