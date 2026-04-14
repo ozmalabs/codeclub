@@ -79,6 +79,17 @@ except ImportError:
     UpliftPreference = None  # type: ignore[assignment,misc]
     UpliftDecision = None  # type: ignore[assignment,misc]
 
+try:
+    from .router import ContextRouter, context_window_fits
+except ImportError:
+    ContextRouter = None  # type: ignore[assignment,misc]
+    context_window_fits = None  # type: ignore[assignment]
+
+try:
+    from .compaction import CompactionWorker
+except ImportError:
+    CompactionWorker = None  # type: ignore[assignment,misc]
+
 
 logger = logging.getLogger("codeclub.proxy")
 
@@ -174,7 +185,30 @@ def create_app(
         "uplifts_performed": 0,
         "uplifts_skipped": 0,
         "episodes_created": 0,
+        "model_downgrades": 0,
     }
+
+    # Context-aware router (optional — needs codeclub.infra.models)
+    ctx_router = None
+    try:
+        from codeclub.infra.models import ModelRouter
+        base_router = ModelRouter(prefer_local=True)
+        if ContextRouter is not None:
+            ctx_router = ContextRouter(base_router)
+            logger.info("Context-aware routing enabled")
+    except ImportError:
+        logger.info("ModelRouter not available — routing passthrough only")
+
+    # Background compaction worker (optional)
+    compaction_worker = None
+    if CompactionWorker is not None and store is not None:
+        compaction_worker = CompactionWorker(store, check_interval_s=120.0)
+        compaction_worker.start()
+
+    @app.on_event("shutdown")
+    async def _shutdown():
+        if compaction_worker is not None:
+            compaction_worker.stop()
 
     # ------------------------------------------------------------------
     # Main proxy endpoint
@@ -314,11 +348,39 @@ def create_app(
             ",".join(assembled.sources),
         )
 
-        # 6. Build forwarded request
+        # 6. Context-aware routing (optional model override)
+        routed_model = model
+        if ctx_router is not None and not request.headers.get("X-Context-Model"):
+            try:
+                from codeclub.infra.models import estimate_complexity
+                complexity = estimate_complexity(effective_message)
+                routing = ctx_router.select(
+                    phase="fill",
+                    complexity=complexity,
+                    context_tokens=assembled.total_tokens,
+                    difficulty=50,
+                    clarity=clarity,
+                    fit_level=fit or FitLevel.BALANCED,
+                )
+                if routing.model is not None and routing.model.id != model:
+                    logger.info(
+                        "Route override: %s -> %s (ctx=%d, smash=%.2f)",
+                        model, routing.model.id,
+                        assembled.total_tokens, routing.smash_fit,
+                    )
+                    routed_model = routing.model.id
+                    if routing.model_downgraded:
+                        stats["model_downgrades"] += 1
+            except Exception:
+                logger.debug("Routing decision failed, keeping original model", exc_info=True)
+
+        # 7. Build forwarded request
         forwarded_body = dict(body)
         forwarded_body["messages"] = assembled.as_messages()
+        if routed_model != model:
+            forwarded_body["model"] = routed_model
 
-        # 7. Forward and stream
+        # 8. Forward and stream
         if stream:
             return StreamingResponse(
                 _stream_and_index(forwarded_body, ep_id, store, stats),
