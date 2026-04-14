@@ -3002,6 +3002,9 @@ class FightResult:
     fill_code: str = ""
     final_code: str = ""
 
+    # Diagnostics
+    error: str = ""                    # failure reason if quality == 0
+
     # Club Smash
     smash_fit: float = 0.0             # right-sizing score (0.0–1.0)
     smash_measured: int = 0            # measured smash (0–100)
@@ -3204,6 +3207,7 @@ def fight_oneshot(contender: Contender, task: TournamentTask) -> FightResult:
 
     res = call_model(contender, _oneshot_messages(task), max_tokens=4000)
     if res.error:
+        result.error = f"api_error: {res.error}"
         return result
 
     code = extract_code(res.content)
@@ -3216,8 +3220,9 @@ def fight_oneshot(contender: Contender, task: TournamentTask) -> FightResult:
         + res.tokens_out * contender.cost_output
     ) / 1e6
 
-    ok, _ = task.runner.check_syntax(code)
+    ok, syntax_err = task.runner.check_syntax(code)
     if not ok:
+        result.error = f"syntax_error: {syntax_err[:200]}"
         return result
 
     test_results = run_tests(code, task)

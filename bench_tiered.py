@@ -132,7 +132,9 @@ def main():
             print(f"  → {icon} {r.tests_passed}/{r.tests_total}"
                   f"  ⏱{r.elapsed_s:.1f}s  💰${r.cost:.6f}")
 
-            if r.quality < 1.0 and r.test_details:
+            if r.error:
+                print(f"       🔥 {r.error[:100]}")
+            elif r.quality < 1.0 and r.test_details:
                 failed = [(n, e) for n, p, e in r.test_details if not p]
                 if failed:
                     print(f"       ❌ {failed[0][1][:80]}")
@@ -168,6 +170,8 @@ def main():
                 "tokens_out": r.tokens_out,
                 "smash_measured": r.smash_measured,
                 "energy_j": r.energy_j,
+                "error": r.error,
+                "code_snippet": (r.final_code or "")[:500],
             })
 
     # Summary
