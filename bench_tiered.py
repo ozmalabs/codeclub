@@ -153,7 +153,6 @@ def main():
                 "coord_clarity": coord.clarity,
                 "model": c.name,
                 "model_params_b": c.params_b,
-                "model_active_params_b": c.active_params_b,
                 "model_quant": c.quant,
                 "model_tok_s": c.tok_s,
                 "model_is_local": c.is_local,

@@ -113,8 +113,8 @@ Estimated from model specs:
 
 Quantization degrades capability: Q8→0.95×, Q6_K→0.90×, Q4_K_M→0.80×, Q2_K→0.55×.
 
-MoE models use active parameter count for speed but total params for routing
-capability heuristics.
+These estimates are the cold start — used before real benchmarks exist. Once a model
+has an empirical efficiency map, the map is the truth regardless of architecture.
 
 ## Efficiency visualisation
 

@@ -268,11 +268,12 @@ def estimate_smash_range(
     """
     Estimate a model's Club Smash range from its specs.
 
-    Effective parameter count determines capability.
-    MoE models use active params (faster per-token, but capability
-    matches the active params for focused tasks).
-    Quantisation degrades capability slightly.
-    Clarity tolerance scales with size — bigger = handles more ambiguity.
+    This is the cold-start estimator — used before we have an empirical
+    efficiency map. Once real benchmark data exists, the map is the truth
+    and architecture (MoE, dense, etc.) becomes irrelevant.
+
+    MoE models use active params for estimation since per-token capability
+    tracks the active parameter count, not total.
     """
     effective = active_params_b if (is_moe and active_params_b) else params_b
 
@@ -322,12 +323,10 @@ def estimate_tok_s(params_b: float, active_params_b: float | None,
                    is_moe: bool, quant: str, is_local: bool,
                    is_gpu: bool) -> float:
     """
-    Estimate tokens/second when tok_s isn't measured.
+    Cold-start throughput estimate before real measurement exists.
 
-    Rough heuristics:
-    - GPU local: speed ∝ 1/active_params (memory-bandwidth bound)
-    - CPU local: slow, scales worse
-    - Cloud: assume ~80-120 tok/s (varies, but latency-dominated)
+    Once tok_s is measured, this is never called. MoE active params
+    matter here because memory-bandwidth scales with active params.
     """
     effective = active_params_b if (is_moe and active_params_b) else params_b
 
@@ -2052,10 +2051,7 @@ class Contender:
             parts.append("GPU" if self.is_gpu else "CPU")
         else:
             parts.append("cloud")
-        if self.is_moe:
-            parts.append(f"MoE {self.params_b:.0f}B/{self.active_params_b:.0f}B active")
-        else:
-            parts.append(f"{self.params_b:.0f}B")
+        parts.append(f"{self.params_b:.0f}B")
         if self.quant:
             parts.append(self.quant)
         if self.tok_s:

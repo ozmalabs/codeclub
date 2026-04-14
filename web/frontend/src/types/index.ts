@@ -87,9 +87,7 @@ export interface ModelInfo {
   name: string;
   provider: string;
   params_b: number | null;
-  active_params_b: number | null;
   quant: string | null;
-  is_moe: boolean;
   context_window: number;
   cost_per_mtok_in: number | null;
   cost_per_mtok_out: number | null;

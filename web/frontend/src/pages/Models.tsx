@@ -44,7 +44,7 @@ function ModelCard({ model }: { model: ModelInfo }) {
         {model.params_b != null && (
           <>
             <dt className="text-slate-400">Params</dt>
-            <dd className="text-slate-200 text-right">{model.params_b}B{model.is_moe ? ' MoE' : ''}</dd>
+            <dd className="text-slate-200 text-right">{model.params_b}B</dd>
           </>
         )}
         {model.quant != null && (
