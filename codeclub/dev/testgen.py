@@ -54,13 +54,14 @@ _CRITERIA_TEMPLATE = """\
 """
 
 
-def _build_prompt(code: str, task: str, acceptance_criteria: list[str] | None = None) -> str:
+def _build_prompt(code: str, task: str, acceptance_criteria: list[str] | None = None, test_hints: str = "") -> str:
     criteria_block = ""
     if acceptance_criteria:
         criteria_block = _CRITERIA_TEMPLATE.format(
             criteria="\n".join(f"- {c}" for c in acceptance_criteria)
         )
-    return _TESTGEN_PROMPT.format(code=code, task=task, criteria_block=criteria_block)
+    hints_block = f"\n{test_hints}\n" if test_hints else ""
+    return _TESTGEN_PROMPT.format(code=code, task=task, criteria_block=criteria_block) + hints_block
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +74,7 @@ def generate_tests(
     call_fn: Callable[[str], str],
     *,
     acceptance_criteria: list[str] | None = None,
+    test_hints: str = "",
 ) -> str:
     """
     Generate pytest tests for assembled code.
@@ -84,11 +86,13 @@ def generate_tests(
     call_fn:              LLM callable.
     acceptance_criteria:  Optional list of acceptance criteria strings from the spec.
                           Included in prompt to anchor test assertions.
+    test_hints:           Rendered test stack hints (from stacks.render_test_hints)
+                          to specify which test frameworks and tools to use.
 
     Returns the test file as a string (ready to write to a .py file).
     """
     from .generate import _strip_fences
-    prompt = _build_prompt(code, task, acceptance_criteria)
+    prompt = _build_prompt(code, task, acceptance_criteria, test_hints)
     raw = call_fn(prompt)
     extracted = _strip_fences(raw)
     return _clean_test_output(extracted, code)

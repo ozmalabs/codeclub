@@ -103,9 +103,10 @@ Rules:
 """
 
 
-def _build_prompt(task: str, context: str = "") -> str:
+def _build_prompt(task: str, context: str = "", stack_hints: str = "") -> str:
     context_block = f"<context>\n{context}\n</context>\n\n" if context.strip() else ""
-    return _SPEC_PROMPT.format(task=task, context_block=context_block)
+    stack_block = f"\n{stack_hints}\n\n" if stack_hints else ""
+    return _SPEC_PROMPT.format(task=task, context_block=context_block) + stack_block
 
 
 # ---------------------------------------------------------------------------
@@ -180,17 +181,20 @@ def decompose(
     task: str,
     context: str = "",
     call_fn: Callable[[str], str] | None = None,
+    stack_hints: str = "",
 ) -> FeatureSpec:
     """
     Decompose an abstract task description into a structured FeatureSpec.
 
     Parameters
     ----------
-    task:      Natural language description of the feature or change.
-    context:   Optional: existing code stubs or interface definitions.
-               Pass compressed/stubbed context (pipeline.run_stub) for token efficiency.
-    call_fn:   LLM callable. Defaults to a no-op that returns a minimal spec
-               (useful for testing without a model).
+    task:         Natural language description of the feature or change.
+    context:      Optional: existing code stubs or interface definitions.
+                  Pass compressed/stubbed context (pipeline.run_stub) for token efficiency.
+    call_fn:      LLM callable. Defaults to a no-op that returns a minimal spec
+                  (useful for testing without a model).
+    stack_hints:  Rendered stack hints block (from stacks.render_hints) to inject
+                  library/architecture constraints into the decomposition prompt.
 
     Returns a FeatureSpec with user story, requirements, acceptance criteria,
     architecture notes, and a list of atomic TaskSpecs.
@@ -203,7 +207,7 @@ def decompose(
             tasks=[TaskSpec(id="T1", title=task[:60], description=task)],
         )
 
-    prompt = _build_prompt(task, context)
+    prompt = _build_prompt(task, context, stack_hints)
     raw = call_fn(prompt)
     return _parse_spec(raw, task)
 

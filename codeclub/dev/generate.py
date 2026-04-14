@@ -242,7 +242,7 @@ _MAP_SUFFIX = {
 }
 
 
-def map_prompt(task: str, context: str = "", *, tier: ModelTier = ModelTier.MEDIUM) -> str:
+def map_prompt(task: str, context: str = "", *, tier: ModelTier = ModelTier.MEDIUM, stack_hints: str = "") -> str:
     """
     Build the Phase 1 prompt.
 
@@ -253,6 +253,8 @@ def map_prompt(task: str, context: str = "", *, tier: ModelTier = ModelTier.MEDI
     parts = []
     if context:
         parts.append(f"<context>\n{context}\n</context>\n")
+    if stack_hints:
+        parts.append(f"{stack_hints}\n")
     parts.append(f"<task>\n{task}\n</task>\n")
     parts.append(_MAP_SUFFIX[tier])
     return "\n".join(parts)
@@ -280,6 +282,7 @@ def fill_prompt(
     *,
     tier: ModelTier = ModelTier.SMALL,
     error_context: str = "",
+    fill_hints: str = "",
 ) -> str:
     """
     Build the Phase 2 prompt for one function.
@@ -290,6 +293,7 @@ def fill_prompt(
       - The specific signature to implement
       - A constraint listing only the callable methods (prevents hallucination)
       - Optional error context for fix-loop retries
+      - Optional fill_hints (compact import/library hints from stacks.render_fill_hints)
     """
     # Extract all method/function names from the stub so the model
     # knows exactly what it can call — prevents inventing helpers like
@@ -301,12 +305,13 @@ def fill_prompt(
     ) if available else ""
 
     error_block = f"\n<previous_error>\n{error_context}\n</previous_error>\n" if error_context else ""
+    hints_block = f"\n{fill_hints}\n" if fill_hints else ""
 
     return (
         f"<module_interface>\n{stub_map}\n</module_interface>\n\n"
         f"<task>\n{task}\n</task>\n\n"
         f"<implement>\n{fn_sig}\n</implement>\n"
-        f"{available_note}\n{error_block}\n"
+        f"{available_note}\n{error_block}{hints_block}\n"
         f"{_FILL_SUFFIX[tier]}"
     )
 
@@ -500,6 +505,8 @@ def generate(
     fill_tier: ModelTier = ModelTier.SMALL,
     max_workers: int = 4,
     language: str = "python",
+    stack_hints: str = "",
+    fill_hints: str = "",
 ) -> GenerationResult:
     """
     Full two-phase generation pipeline.
@@ -538,7 +545,7 @@ def generate(
     _fill_fn = fill_call_fn if fill_call_fn is not None else map_call_fn
 
     # --- Phase 1: Map ---
-    map_p = map_prompt(task, context, tier=map_tier)
+    map_p = map_prompt(task, context, tier=map_tier, stack_hints=stack_hints)
     map_tokens_in = len(enc.encode(map_p))
     stub_map = _strip_fences(map_call_fn(map_p))
     map_tokens_out = len(enc.encode(stub_map))
@@ -562,7 +569,7 @@ def generate(
     errors: dict[str, str] = {}
 
     def _fill_one(slot: StubSlot) -> tuple[str, str, int, int]:
-        p = fill_prompt(stub_map, slot.name, slot.sig, task, tier=fill_tier)
+        p = fill_prompt(stub_map, slot.name, slot.sig, task, tier=fill_tier, fill_hints=fill_hints)
         ti = len(enc.encode(p))
         raw = _fill_fn(p)
         result = _strip_fences(raw)

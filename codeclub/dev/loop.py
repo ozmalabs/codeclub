@@ -42,6 +42,7 @@ CLI
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -73,6 +74,15 @@ from codeclub.accounting.baseline import compute_savings, SavingsReport
 # call_fn factories (re-exported here for convenience)
 # ---------------------------------------------------------------------------
 
+def _read_env_value(name: str) -> str:
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if line.startswith(name) and "=" in line:
+                return line.split("=", 1)[1].strip()
+    return os.environ.get(name, "")
+
+
 def make_openrouter_fn(
     model_id: str,
     *,
@@ -87,14 +97,7 @@ def make_openrouter_fn(
     Reads OPENROUTER_API_KEY from .env if api_key not provided.
     """
     if api_key is None:
-        env_file = Path(__file__).parent / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if "OPENROUTER_API_KEY" in line and "=" in line:
-                    api_key = line.split("=", 1)[1].strip()
-                    break
-    if not api_key:
-        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        api_key = _read_env_value("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY not found in .env or environment")
 
@@ -182,14 +185,7 @@ def make_github_models_fn(
     Endpoint: https://models.inference.ai.azure.com
     """
     if api_key is None:
-        env_file = Path(__file__).parent / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if line.startswith("GITHUB_TOKEN") and "=" in line:
-                    api_key = line.split("=", 1)[1].strip()
-                    break
-    if not api_key:
-        api_key = os.environ.get("GITHUB_TOKEN", "")
+        api_key = _read_env_value("GITHUB_TOKEN")
     if not api_key:
         raise RuntimeError("GITHUB_TOKEN not found in .env or environment")
 
@@ -228,6 +224,96 @@ def make_github_models_fn(
     return _call
 
 
+def _coerce_copilot_content(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "content", "summary", "message"):
+            inner = value.get(key)
+            if isinstance(inner, str) and inner:
+                return inner
+        return json.dumps(value)
+    return ""
+
+
+def _extract_copilot_response_text(data: object) -> str:
+    for attr in ("content", "transformed_content", "summary_content", "message"):
+        text = _coerce_copilot_content(getattr(data, attr, None))
+        if text:
+            return text
+    return ""
+
+
+def make_copilot_sdk_fn(
+    model_id: str,
+    *,
+    github_token: str | None = None,
+    cli_path: str | None = None,
+    cwd: str | None = None,
+    timeout: int = 120,
+    max_tokens: int = 2048,
+    temperature: float = 0.1,
+    reasoning_effort: str | None = None,
+) -> Callable[[str], str]:
+    """
+    call_fn for the GitHub Copilot SDK via the local Copilot CLI.
+
+    Uses GITHUB_TOKEN when provided, otherwise falls back to the user's Copilot
+    CLI login session. max_tokens and temperature are accepted for interface
+    parity with the other providers but are controlled by the SDK/CLI runtime.
+    """
+    try:
+        from copilot import CopilotClient, SubprocessConfig
+        from copilot.session import PermissionHandler
+    except ImportError:
+        raise RuntimeError(
+            "github-copilot-sdk package not installed — run: pip install github-copilot-sdk"
+        )
+
+    if github_token is None:
+        github_token = _read_env_value("GITHUB_TOKEN") or None
+
+    working_directory = cwd or os.getcwd()
+    _ = max_tokens, temperature
+
+    async def _call_async(prompt: str) -> str:
+        config_kwargs = {
+            "cwd": working_directory,
+            "log_level": "error",
+        }
+        if cli_path is not None:
+            config_kwargs["cli_path"] = cli_path
+        if github_token:
+            config_kwargs["github_token"] = github_token
+            config_kwargs["use_logged_in_user"] = False
+
+        async with CopilotClient(SubprocessConfig(**config_kwargs)) as client:
+            session_kwargs = {
+                "on_permission_request": PermissionHandler.approve_all,
+                "model": model_id,
+                "working_directory": working_directory,
+            }
+            if reasoning_effort is not None:
+                session_kwargs["reasoning_effort"] = reasoning_effort
+
+            async with await client.create_session(**session_kwargs) as session:
+                response = await session.send_and_wait(prompt, timeout=timeout)
+
+        if response is None:
+            raise RuntimeError(f"Copilot SDK returned no assistant message for model {model_id}")
+
+        text = _extract_copilot_response_text(response.data)
+        if not text:
+            raise RuntimeError(f"Copilot SDK returned an empty assistant message for model {model_id}")
+        return text
+
+    def _call(prompt: str) -> str:
+        return asyncio.run(_call_async(prompt))
+
+    _call.__name__ = f"copilot-sdk:{model_id}"
+    return _call
+
+
 def make_anthropic_fn(
     model_id: str,
     *,
@@ -244,14 +330,7 @@ def make_anthropic_fn(
         )
 
     if api_key is None:
-        env_file = Path(__file__).parent / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if "ANTHROPIC_API_KEY" in line and "=" in line:
-                    api_key = line.split("=", 1)[1].strip()
-                    break
-    if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        api_key = _read_env_value("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY not found in .env or environment")
 
@@ -304,6 +383,8 @@ def make_call_fn(
         return make_llama_server_fn(url, max_tokens=max_tokens, temperature=temperature)
     elif model.provider == "anthropic":
         return make_anthropic_fn(model.id, max_tokens=max_tokens, temperature=temperature)
+    elif model.provider == "copilot-sdk":
+        return make_copilot_sdk_fn(model.id, cwd=os.getcwd(), max_tokens=max_tokens, temperature=temperature)
     elif model.provider == "github":
         return make_github_models_fn(model.id, max_tokens=max_tokens, temperature=temperature)
     else:
@@ -416,6 +497,7 @@ def _refill_failures(
     test_result: TestResult,
     fill_fn: Callable[[str], str],
     task: str,
+    fill_hints: str = "",
 ) -> GenerationResult:
     """
     Re-fill only the functions implicated in test failures.
@@ -470,6 +552,7 @@ def _refill_failures(
             gen_result.stub_map, slot.name, slot.sig, task,
             tier=ModelTier.SMALL,
             error_context=fn_err,
+            fill_hints=fill_hints,
         )
         ti = len(enc.encode(prompt))
         raw = fill_fn(prompt)
@@ -524,6 +607,7 @@ def run(
     verbose: bool = True,
     llama_server_url: str = "http://localhost:8081",
     electricity_rate: float = 0.15,  # USD/kWh for energy cost calculation
+    stack: str | None = None,
 ) -> LoopResult:
     """
     Full autonomous development loop.
@@ -551,9 +635,18 @@ def run(
     run_review:         Whether to run the code review phase.
     verbose:            Print progress to stdout.
     llama_server_url:   Base URL for llama-server (default localhost:8081).
+    stack:              Stack name to use (e.g. 'web-api', 'cli', 'data').
+                        If None, auto-detected from task keywords.
     """
     t_start = time.time()
     _tracker = tracker or PerformanceTracker()
+
+    # ── Stack hints (data-driven, no LLM) ────────────────────────────────────
+    from codeclub.stacks import resolve_stack, render_hints, render_fill_hints, render_test_hints
+    _stack = resolve_stack(task, stack_name=stack)
+    _stack_hints = render_hints(_stack)
+    _fill_hints = render_fill_hints(_stack)
+    _test_hints = render_test_hints(_stack)
 
     # ── Router-based model selection ─────────────────────────────────────────
     complexity = ""
@@ -656,13 +749,14 @@ def run(
     if complexity:
         _log(f"  Complexity: {complexity.upper()}")
     _log(f"  Map: {map_model}  |  Fill: {fill_model}")
+    _log(f"  Stack: {_stack.name} ({_stack.description})")
     _log(f"{'━'*65}")
 
     _log("\n  [1/6] Decomposing task into spec ...")
     t_phase = time.time(); e_phase = read_energy()
     spec_fn_name = getattr(_spec_fn, '__name__', 'spec')
     try:
-        spec = decompose(task, context, call_fn=_spec_fn)
+        spec = decompose(task, context, call_fn=_spec_fn, stack_hints=_stack_hints)
         _record("spec", spec_fn_name, True, t_phase)
         _mid, _prv = _model_meta(spec_fn_name); _ri, _ro = _suite_rates("spec")
         ledger.add("spec", _mid, _prv, wall_s=time.time()-t_phase,
@@ -687,6 +781,8 @@ def run(
             max_workers=4,
             map_tier=ModelTier.MEDIUM,
             fill_tier=ModelTier.SMALL,
+            stack_hints=_stack_hints,
+            fill_hints=_fill_hints,
         )
         t_gen_end = time.time(); e_gen_end = read_energy()
         elapsed_gen = t_gen_end - t_gen
@@ -731,6 +827,7 @@ def run(
         tests = generate_tests(
             gen_result.assembled, task, _testgen_fn,
             acceptance_criteria=spec.acceptance_criteria,
+            test_hints=_test_hints,
         )
         _tg_wall = time.time()-t_phase
         _log(f"        {tests.count('def test_')} test functions generated")
@@ -781,7 +878,7 @@ def run(
             _log(f"\n  [5/6] Fixing failures (iteration {iteration+1}/{max_fix_iterations}) ...")
             _log(f"        Implicated: {test_result.failed_tests}")
             t_fix = time.time()
-            gen_result = _refill_failures(gen_result, test_result, _fill_fn, task)
+            gen_result = _refill_failures(gen_result, test_result, _fill_fn, task, fill_hints=_fill_hints)
             _record("fill", fill_model, True, t_fix, gen_result.fill_tokens_out)
     else:
         _log("\n  [4/6] Skipping tests (none generated)")
@@ -879,7 +976,7 @@ Setup presets (--setup):
   openrouter_free  Free-tier OpenRouter (rate-limited)
   openrouter_cheap Paid OpenRouter, cheap models (< $0.002/call)
   anthropic        Direct Anthropic API (Claude Opus/Sonnet/Haiku)
-  copilot          GitHub Copilot Models (GPT-4o-mini / GPT-4.1-mini)
+  copilot          GitHub Copilot SDK via local Copilot CLI
   github           GitHub Models inference endpoint
   best_local_first Local preferred, cloud fallback for complex phases
 
@@ -920,6 +1017,9 @@ Model overrides (bypass router for a specific phase):
     # ── Loop params ────────────────────────────────────────────────────────
     parser.add_argument("--max-iterations", type=int, default=3)
     parser.add_argument("--no-review", action="store_true")
+    parser.add_argument("--stack", default=None,
+                        choices=["web-api", "cli", "data", "library", "async-service"],
+                        help="Stack to use (auto-detected from task if omitted)")
     parser.add_argument("--electricity-rate", type=float, default=0.15,
                         help="Local electricity rate in USD/kWh (default: 0.15)")
     parser.add_argument("--output", help="Write final code to this file")
@@ -1012,6 +1112,7 @@ Model overrides (bypass router for a specific phase):
         run_review=not args.no_review,
         llama_server_url=args.llama_server,
         electricity_rate=args.electricity_rate,
+        stack=args.stack,
     )
 
     if args.output and result.final_code:
