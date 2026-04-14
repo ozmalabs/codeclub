@@ -731,6 +731,12 @@ class TournamentTask:
     # Club Smash — base difficulty of the underlying challenge (0–100)
     base_difficulty: int = 35
 
+    # Spec clarity (0–100): how precisely the spec describes the expected output.
+    # High clarity = exact method signatures, types, edge cases documented.
+    # Low clarity = vague natural language, model must infer the design.
+    # If set, overrides the role's default clarity in coord_for().
+    spec_clarity: int | None = None
+
     # Optional per-role coordinate overrides (falls back to role_coord())
     role_overrides: dict[str, SmashCoord] = field(default_factory=dict)
 
@@ -738,7 +744,10 @@ class TournamentTask:
         """Get the (difficulty, clarity) point for this task in a given role."""
         if role in self.role_overrides:
             return self.role_overrides[role]
-        return role_coord(self.base_difficulty, role)
+        coord = role_coord(self.base_difficulty, role)
+        if self.spec_clarity is not None:
+            coord = SmashCoord(coord.difficulty, self.spec_clarity)
+        return coord
 
     @property
     def method_signatures(self) -> str:
@@ -815,6 +824,7 @@ TASKS["rate-limiter"] = TournamentTask(
         """)),
     ],
     base_difficulty=20,     # simple sliding window + time tracking
+    spec_clarity=85,
 )
 
 # ---------------------------------------------------------------------------
@@ -876,6 +886,7 @@ TASKS["lru-cache"] = TournamentTask(
         """)),
     ],
     base_difficulty=25,     # LRU ordering is the main challenge
+    spec_clarity=85,
 )
 
 # ---------------------------------------------------------------------------
@@ -947,6 +958,7 @@ TASKS["event-emitter"] = TournamentTask(
         """)),
     ],
     base_difficulty=40,     # once() wrapper is the tricky part
+    spec_clarity=85,
     role_overrides={
         "fill": SmashCoord(difficulty=45, clarity=90),   # once() is hard even with skeleton
     },
@@ -1014,6 +1026,7 @@ TASKS["expr-parser"] = TournamentTask(
         """)),
     ],
     base_difficulty=55,     # recursive descent with precedence, unary, vars
+    spec_clarity=85,
 )
 
 # ---------------------------------------------------------------------------
@@ -1098,6 +1111,7 @@ TASKS["fsm"] = TournamentTask(
         """)),
     ],
     base_difficulty=55,     # guards + actions + entry/exit ordering
+    spec_clarity=85,
     role_overrides={
         "oneshot": SmashCoord(difficulty=65, clarity=60),  # must infer ordering conventions
     },
@@ -1195,6 +1209,7 @@ TASKS["rust-stack-calc"] = TournamentTask(
         """)),
     ],
     base_difficulty=45,     # straightforward but needs Rust fluency
+    spec_clarity=85,
 )
 
 # ---------------------------------------------------------------------------
@@ -1292,6 +1307,7 @@ TASKS["rust-trie"] = TournamentTask(
         """)),
     ],
     base_difficulty=60,     # Rust ownership + recursive delete + trie cleanup
+    spec_clarity=85,
     role_overrides={
         "fill": SmashCoord(difficulty=65, clarity=85),  # recursive delete in Rust is hard
     },
@@ -1358,6 +1374,7 @@ TASKS["counter"] = TournamentTask(
         """)),
     ],
     base_difficulty=8,
+    spec_clarity=85,
 )
 
 # ---------------------------------------------------------------------------
@@ -1413,6 +1430,7 @@ TASKS["rust-hello-struct"] = TournamentTask(
         """)),
     ],
     base_difficulty=12,
+    spec_clarity=85,
 )
 
 # ---------------------------------------------------------------------------
@@ -1517,6 +1535,7 @@ TASKS["min-stack"] = TournamentTask(
         """)),
     ],
     base_difficulty=30,
+    spec_clarity=85,
 )
 
 # ---------------------------------------------------------------------------
@@ -1595,6 +1614,7 @@ TASKS["csv-parser"] = TournamentTask(
         """)),
     ],
     base_difficulty=35,
+    spec_clarity=85,
     role_overrides={
         "fill": SmashCoord(difficulty=40, clarity=85),  # Rust string handling is fiddly
     },
@@ -1672,6 +1692,7 @@ TASKS["json-path"] = TournamentTask(
         """)),
     ],
     base_difficulty=70,
+    spec_clarity=85,
     role_overrides={
         "fill": SmashCoord(difficulty=75, clarity=80),
     },
@@ -1743,6 +1764,7 @@ TASKS["mini-regex"] = TournamentTask(
         """)),
     ],
     base_difficulty=78,
+    spec_clarity=85,
     role_overrides={
         "fill": SmashCoord(difficulty=82, clarity=75),
     },
@@ -1869,6 +1891,7 @@ TASKS["rust-json-parser"] = TournamentTask(
         """)),
     ],
     base_difficulty=75,
+    spec_clarity=85,
     role_overrides={
         "fill": SmashCoord(difficulty=80, clarity=80),
     },
@@ -1973,9 +1996,495 @@ TASKS["rust-arena-alloc"] = TournamentTask(
         """)),
     ],
     base_difficulty=82,
+    spec_clarity=85,
     role_overrides={
         "fill": SmashCoord(difficulty=85, clarity=75),
     },
+)
+
+
+# ---------------------------------------------------------------------------
+# LOW-CLARITY & MID-CLARITY TASK VARIANTS
+# Same underlying challenge, but the spec is vague or ambiguous.
+# This lets us measure the clarity axis independently of difficulty.
+# ---------------------------------------------------------------------------
+
+# --- Counter: vague (clarity 30) ----------------------------------------
+# Same difficulty as counter (8), but the spec is intentionally ambiguous.
+# "reset" could mean reset-to-zero or reset-to-initial.  "Count things" is
+# all the model gets.  The tests still expect initial-value reset.
+TASKS["counter-vague"] = TournamentTask(
+    id="counter-vague",
+    name="Counter",
+    lang="python",
+    description="Make a counter. It should count things and be resettable.",
+    expected_class="Counter",
+    methods=[],  # no method hints at all
+    tests=[
+        ("basic_increment", textwrap.dedent("""\
+            c = Counter()
+            c.increment()
+            c.increment()
+            assert c.value == 2
+        """)),
+        ("decrement", textwrap.dedent("""\
+            c = Counter()
+            c.increment()
+            c.increment()
+            c.decrement()
+            assert c.value == 1
+        """)),
+        ("custom_start", textwrap.dedent("""\
+            c = Counter(10)
+            c.increment()
+            assert c.value == 11
+        """)),
+        ("reset_to_initial", textwrap.dedent("""\
+            c = Counter(5)
+            c.increment()
+            c.increment()
+            c.reset()
+            assert c.value == 5
+        """)),
+        ("no_negative", textwrap.dedent("""\
+            c = Counter()
+            c.decrement()
+            assert c.value == 0
+        """)),
+    ],
+    base_difficulty=8,
+    spec_clarity=30,
+)
+
+# --- Counter: mid-clarity (clarity 55) ------------------------------------
+# Method names given but no types, edge cases not mentioned.
+TASKS["counter-mid"] = TournamentTask(
+    id="counter-mid",
+    name="Counter",
+    lang="python",
+    description=(
+        "A counter class with increment, decrement, reset, and a value property. "
+        "It should support starting from a custom initial value."
+    ),
+    expected_class="Counter",
+    methods=["increment", "decrement", "reset", "value"],
+    tests=[
+        ("basic_increment", textwrap.dedent("""\
+            c = Counter()
+            c.increment()
+            c.increment()
+            assert c.value == 2
+        """)),
+        ("decrement", textwrap.dedent("""\
+            c = Counter()
+            c.increment()
+            c.increment()
+            c.decrement()
+            assert c.value == 1
+        """)),
+        ("custom_start", textwrap.dedent("""\
+            c = Counter(10)
+            c.increment()
+            assert c.value == 11
+        """)),
+        ("reset_to_initial", textwrap.dedent("""\
+            c = Counter(5)
+            c.increment()
+            c.increment()
+            c.reset()
+            assert c.value == 5
+        """)),
+        ("no_negative", textwrap.dedent("""\
+            c = Counter()
+            c.decrement()
+            assert c.value == 0
+        """)),
+    ],
+    base_difficulty=8,
+    spec_clarity=55,
+)
+
+# --- Rate limiter: vague (clarity 25) ------------------------------------
+# No method signatures, no mention of sliding window or time tracking.
+TASKS["rate-limiter-vague"] = TournamentTask(
+    id="rate-limiter-vague",
+    name="RateLimiter",
+    lang="python",
+    description=(
+        "Limit how often something can be called. Should support setting "
+        "a maximum number of calls in a time window."
+    ),
+    expected_class="RateLimiter",
+    methods=[],
+    tests=[
+        ("basic_limiting", textwrap.dedent("""\
+            rl = RateLimiter(max_calls=2, period=1.0)
+            assert rl.allow() is True
+            assert rl.allow() is True
+            assert rl.allow() is False
+        """)),
+        ("reset_after_period", textwrap.dedent("""\
+            import time
+            rl = RateLimiter(max_calls=1, period=0.1)
+            assert rl.allow() is True
+            assert rl.allow() is False
+            time.sleep(0.15)
+            assert rl.allow() is True
+        """)),
+        ("remaining_count", textwrap.dedent("""\
+            rl = RateLimiter(max_calls=3, period=1.0)
+            assert rl.remaining() == 3
+            rl.allow()
+            assert rl.remaining() == 2
+        """)),
+        ("reset_method", textwrap.dedent("""\
+            rl = RateLimiter(max_calls=2, period=1.0)
+            rl.allow(); rl.allow()
+            assert rl.allow() is False
+            rl.reset()
+            assert rl.allow() is True
+        """)),
+    ],
+    base_difficulty=20,
+    spec_clarity=25,
+)
+
+# --- Expr parser: vague (clarity 20) -------------------------------------
+# Notoriously hard when vague: precedence, unary, variables — none mentioned.
+TASKS["expr-parser-vague"] = TournamentTask(
+    id="expr-parser-vague",
+    name="ExprParser",
+    lang="python",
+    description="Parse and evaluate math expressions from strings.",
+    expected_class="ExprParser",
+    methods=[],
+    tests=[
+        ("basic_add", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("2 + 3") == 5.0
+        """)),
+        ("precedence", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("2 + 3 * 4") == 14.0
+        """)),
+        ("parentheses", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("(2 + 3) * 4") == 20.0
+        """)),
+        ("unary_neg", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("-3 + 5") == 2.0
+        """)),
+        ("variables", textwrap.dedent("""\
+            p = ExprParser()
+            p.set_variable("x", 10)
+            assert p.evaluate("x * 2 + 1") == 21.0
+        """)),
+        ("nested_parens", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("((2 + 3) * (4 - 1))") == 15.0
+        """)),
+        ("division", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("10 / 4") == 2.5
+        """)),
+    ],
+    base_difficulty=55,
+    spec_clarity=20,
+)
+
+# --- Expr parser: mid-clarity (clarity 50) --------------------------------
+# Operations listed, set_variable mentioned, but no types or precedence rules.
+TASKS["expr-parser-mid"] = TournamentTask(
+    id="expr-parser-mid",
+    name="ExprParser",
+    lang="python",
+    description=(
+        "A math expression parser that supports +, -, *, / with parentheses. "
+        "Should handle variables via set_variable. Unary minus should work."
+    ),
+    expected_class="ExprParser",
+    methods=["evaluate", "set_variable"],
+    tests=[
+        ("basic_add", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("2 + 3") == 5.0
+        """)),
+        ("precedence", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("2 + 3 * 4") == 14.0
+        """)),
+        ("parentheses", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("(2 + 3) * 4") == 20.0
+        """)),
+        ("unary_neg", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("-3 + 5") == 2.0
+        """)),
+        ("variables", textwrap.dedent("""\
+            p = ExprParser()
+            p.set_variable("x", 10)
+            assert p.evaluate("x * 2 + 1") == 21.0
+        """)),
+        ("nested_parens", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("((2 + 3) * (4 - 1))") == 15.0
+        """)),
+        ("division", textwrap.dedent("""\
+            p = ExprParser()
+            assert p.evaluate("10 / 4") == 2.5
+        """)),
+    ],
+    base_difficulty=55,
+    spec_clarity=50,
+)
+
+# --- LRU cache: vague (clarity 30) ----------------------------------------
+# Just "make a cache" — no mention of LRU eviction, capacity, get/put.
+TASKS["lru-cache-vague"] = TournamentTask(
+    id="lru-cache-vague",
+    name="LRUCache",
+    lang="python",
+    description="A cache with a size limit. Old stuff should get evicted.",
+    expected_class="LRUCache",
+    methods=[],
+    tests=[
+        ("basic_store", textwrap.dedent("""\
+            c = LRUCache(capacity=2)
+            c.put("a", 1)
+            assert c.get("a") == 1
+        """)),
+        ("eviction", textwrap.dedent("""\
+            c = LRUCache(capacity=2)
+            c.put("a", 1)
+            c.put("b", 2)
+            c.put("c", 3)
+            assert c.get("a") is None
+            assert c.get("b") == 2
+            assert c.get("c") == 3
+        """)),
+        ("access_refreshes", textwrap.dedent("""\
+            c = LRUCache(capacity=2)
+            c.put("a", 1)
+            c.put("b", 2)
+            c.get("a")  # refresh a
+            c.put("c", 3)  # should evict b, not a
+            assert c.get("a") == 1
+            assert c.get("b") is None
+        """)),
+        ("overwrite", textwrap.dedent("""\
+            c = LRUCache(capacity=2)
+            c.put("a", 1)
+            c.put("a", 99)
+            assert c.get("a") == 99
+        """)),
+        ("size_tracking", textwrap.dedent("""\
+            c = LRUCache(capacity=3)
+            c.put("a", 1)
+            c.put("b", 2)
+            assert len(c) == 2
+        """)),
+    ],
+    base_difficulty=25,
+    spec_clarity=30,
+)
+
+# --- Rust greeter: vague (clarity 25) ------------------------------------
+# No mention of struct, capitalize, or language.  Just "say hello."
+TASKS["rust-hello-vague"] = TournamentTask(
+    id="rust-hello-vague",
+    name="Greeter",
+    lang="rust",
+    description="A thing that greets people. It should be polite.",
+    expected_class="Greeter",
+    methods=[],
+    tests=[
+        ("basic_greet", textwrap.dedent("""\
+            fn main() {
+                let g = Greeter::new("English");
+                assert_eq!(g.greet("Alice"), "Hello, Alice!");
+            }
+        """)),
+        ("uppercase_name", textwrap.dedent("""\
+            fn main() {
+                let g = Greeter::new("English");
+                assert_eq!(g.greet("bob"), "Hello, Bob!");
+            }
+        """)),
+        ("spanish", textwrap.dedent("""\
+            fn main() {
+                let g = Greeter::new("Spanish");
+                assert_eq!(g.greet("Carlos"), "Hola, Carlos!");
+            }
+        """)),
+        ("french", textwrap.dedent("""\
+            fn main() {
+                let g = Greeter::new("French");
+                assert_eq!(g.greet("Marie"), "Bonjour, Marie!");
+            }
+        """)),
+    ],
+    base_difficulty=12,
+    spec_clarity=25,
+)
+
+# --- Event emitter: mid-clarity (clarity 50) ------------------------------
+# Mentions on/emit/off but not once() or return values.
+TASKS["event-emitter-mid"] = TournamentTask(
+    id="event-emitter-mid",
+    name="EventEmitter",
+    lang="python",
+    description=(
+        "An event system. Register handlers with on(), fire them with emit(), "
+        "remove with off(). Also support one-time handlers."
+    ),
+    expected_class="EventEmitter",
+    methods=["on", "emit", "off", "once"],
+    tests=[
+        ("basic_emit", textwrap.dedent("""\
+            results = []
+            ee = EventEmitter()
+            ee.on("click", lambda data: results.append(data))
+            ee.emit("click", "hello")
+            assert results == ["hello"]
+        """)),
+        ("multiple_handlers", textwrap.dedent("""\
+            results = []
+            ee = EventEmitter()
+            ee.on("x", lambda d: results.append(1))
+            ee.on("x", lambda d: results.append(2))
+            ee.emit("x", None)
+            assert results == [1, 2]
+        """)),
+        ("off_removes", textwrap.dedent("""\
+            results = []
+            ee = EventEmitter()
+            handler = lambda d: results.append(d)
+            ee.on("x", handler)
+            ee.off("x", handler)
+            ee.emit("x", "nope")
+            assert results == []
+        """)),
+        ("once_fires_once", textwrap.dedent("""\
+            results = []
+            ee = EventEmitter()
+            ee.once("x", lambda d: results.append(d))
+            ee.emit("x", "a")
+            ee.emit("x", "b")
+            assert results == ["a"]
+        """)),
+        ("emit_returns_count", textwrap.dedent("""\
+            ee = EventEmitter()
+            ee.on("x", lambda d: None)
+            ee.on("x", lambda d: None)
+            assert ee.emit("x", None) == 2
+        """)),
+    ],
+    base_difficulty=40,
+    spec_clarity=50,
+)
+
+# --- CSV parser: vague (clarity 20) --------------------------------------
+# "Parse CSV" is all you get.  Quoting, escaping, headers — not mentioned.
+TASKS["csv-parser-vague"] = TournamentTask(
+    id="csv-parser-vague",
+    name="CsvParser",
+    lang="python",
+    description="Parse CSV data.",
+    expected_class="CsvParser",
+    methods=[],
+    tests=[
+        ("basic_parse", textwrap.dedent("""\
+            p = CsvParser()
+            rows = p.parse("a,b,c\\n1,2,3\\n4,5,6")
+            assert rows == [["a","b","c"],["1","2","3"],["4","5","6"]]
+        """)),
+        ("quoted_fields", textwrap.dedent("""\
+            p = CsvParser()
+            rows = p.parse("name,desc\\nAlice,\\"has,comma\\"")
+            assert rows[1] == ["Alice", "has,comma"]
+        """)),
+        ("empty_fields", textwrap.dedent("""\
+            p = CsvParser()
+            rows = p.parse("a,,c\\n,,")
+            assert rows == [["a","","c"],["","",""]]
+        """)),
+        ("with_headers", textwrap.dedent("""\
+            p = CsvParser(has_header=True)
+            rows = p.parse("name,age\\nAlice,30\\nBob,25")
+            assert rows == [{"name":"Alice","age":"30"},{"name":"Bob","age":"25"}]
+        """)),
+        ("custom_delimiter", textwrap.dedent("""\
+            p = CsvParser(delimiter="\\t")
+            rows = p.parse("a\\tb\\n1\\t2")
+            assert rows == [["a","b"],["1","2"]]
+        """)),
+    ],
+    base_difficulty=35,
+    spec_clarity=20,
+)
+
+# --- MinStack: mid-clarity (clarity 55) -----------------------------------
+# Methods named but no hint about O(1) min or the tricky push/pop tracking.
+TASKS["min-stack-mid"] = TournamentTask(
+    id="min-stack-mid",
+    name="MinStack",
+    lang="python",
+    description=(
+        "A stack that also tracks the minimum value. "
+        "Should support push, pop, top, and get_min."
+    ),
+    expected_class="MinStack",
+    methods=["push", "pop", "top", "get_min"],
+    tests=[
+        ("basic_push_pop", textwrap.dedent("""\
+            s = MinStack()
+            s.push(3)
+            s.push(1)
+            s.push(2)
+            assert s.top() == 2
+            assert s.get_min() == 1
+        """)),
+        ("min_after_pop", textwrap.dedent("""\
+            s = MinStack()
+            s.push(2)
+            s.push(1)
+            s.pop()
+            assert s.get_min() == 2
+        """)),
+        ("duplicate_min", textwrap.dedent("""\
+            s = MinStack()
+            s.push(1)
+            s.push(1)
+            s.pop()
+            assert s.get_min() == 1
+        """)),
+        ("single_element", textwrap.dedent("""\
+            s = MinStack()
+            s.push(42)
+            assert s.top() == 42
+            assert s.get_min() == 42
+        """)),
+        ("descending_push", textwrap.dedent("""\
+            s = MinStack()
+            for v in [5, 4, 3, 2, 1]:
+                s.push(v)
+            assert s.get_min() == 1
+            s.pop(); s.pop()
+            assert s.get_min() == 3
+        """)),
+        ("empty_raises", textwrap.dedent("""\
+            s = MinStack()
+            try:
+                s.pop()
+                assert False, "should have raised"
+            except (IndexError, Exception):
+                pass
+        """)),
+    ],
+    base_difficulty=30,
+    spec_clarity=55,
 )
 
 
@@ -2000,6 +2509,7 @@ class Contender:
     active_params_b: float | None = None    # MoE: active < total
     quant: str = ""
     is_moe: bool = False
+    context_k: int = 128                    # context window in thousands of tokens
 
     # Hardware placement
     is_local: bool = False
@@ -2063,6 +2573,40 @@ class Contender:
         parts.append(f"🏏{self.smash.low}-{self.smash.sweet}-{self.smash.high} ✨{self.smash.min_clarity}+")
         return " · ".join(parts)
 
+    def adjusted_coord(self, coord: SmashCoord) -> SmashCoord:
+        """
+        Adjust a task coordinate for this model's context window.
+
+        Larger context makes the same task effectively easier — the model
+        can see all code + tests + spec at once. Smaller context forces
+        truncation, which increases effective difficulty.
+
+        Baseline is 128k. Clarity stays the same — context doesn't help
+        with ambiguous specs, only with fitting the whole task in view.
+        """
+        # token load for this task
+        tokens = estimate_token_load(coord)
+        ctx_tokens = self.context_k * 1024
+
+        if tokens >= ctx_tokens * 0.9:
+            # Task barely fits or overflows — difficulty spikes
+            penalty = min(20, int(10 * tokens / ctx_tokens))
+        elif ctx_tokens >= 512_000:
+            # Very large context (512k+) — slight ease
+            bonus = -5
+            penalty = bonus
+        elif ctx_tokens >= 128_000:
+            # Standard context — no adjustment
+            penalty = 0
+        else:
+            # Small context (<128k) — harder
+            penalty = max(0, int(5 * (128_000 - ctx_tokens) / 128_000))
+
+        return SmashCoord(
+            difficulty=max(0, min(100, coord.difficulty + penalty)),
+            clarity=coord.clarity,
+        )
+
     def time_for(self, coord: SmashCoord) -> float:
         """Estimated seconds to complete a task at this coordinate."""
         return compute_time_to_complete(self.tok_s or 1.0, coord)
@@ -2089,9 +2633,9 @@ def build_contenders() -> list[Contender]:
             kind="llama-server",
             model_id="EssentialAI_rnj-1-instruct-Q6_K.gguf",
             endpoint="http://127.0.0.1:8081",
-            params_b=8.0, quant="q6_k",
-            is_local=True, is_gpu=True, power_w=150,   # Arc B580 TDP
-            tok_s=45.0,                                  # measured on B580
+            params_b=8.0, quant="q6_k", context_k=32,
+            is_local=True, is_gpu=True, power_w=150,
+            tok_s=45.0,
             club="⚡", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2099,10 +2643,10 @@ def build_contenders() -> list[Contender]:
             kind="llama-server",
             model_id="gemma-4-26B-A4B-it-Q8_0.gguf",
             endpoint="http://192.168.40.253:8080",
-            params_b=26.0, active_params_b=4.0, quant="q8_0",
+            params_b=26.0, active_params_b=4.0, quant="q8_0", context_k=128,
             is_moe=True, is_local=True, is_gpu=True,
-            power_w=500,                                # 3080Ti+3090 combined
-            tok_s=85.0,                                  # MoE: only 4B active
+            power_w=500,
+            tok_s=85.0,
             club="🔥", roles=["map", "fill", "oneshot"],
         ),
         # ── Local CPU (free, slower) ──
@@ -2111,8 +2655,8 @@ def build_contenders() -> list[Contender]:
             kind="ollama",
             model_id="qwen2.5-coder:1.5b",
             endpoint="http://127.0.0.1:11434",
-            params_b=1.5, quant="q4_k_m",
-            is_local=True, is_gpu=False, power_w=100,   # CPU TDP est.
+            params_b=1.5, quant="q4_k_m", context_k=32,
+            is_local=True, is_gpu=False, power_w=100,
             club="🦴", roles=["fill"],
         ),
         Contender(
@@ -2120,7 +2664,7 @@ def build_contenders() -> list[Contender]:
             kind="ollama",
             model_id="qwen3-coder:30b",
             endpoint="http://127.0.0.1:11434",
-            params_b=30.0, quant="q4_k_m",
+            params_b=30.0, quant="q4_k_m", context_k=128,
             is_local=True, is_gpu=False, power_w=100,
             club="🧠", roles=["map", "fill", "oneshot"],
         ),
@@ -2132,7 +2676,7 @@ def build_contenders() -> list[Contender]:
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.20, cost_output=0.77,
             params_b=685.0, active_params_b=37.0,
-            is_moe=True, quant="bf16",
+            is_moe=True, quant="bf16", context_k=128,
             club="💎", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2141,7 +2685,7 @@ def build_contenders() -> list[Contender]:
             model_id="openai/gpt-5.4-nano",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.20, cost_output=1.25,
-            params_b=8.0,                          # estimated ~8B dense
+            params_b=8.0, context_k=1024,
             club="⚛️", roles=["fill", "oneshot"],
         ),
         Contender(
@@ -2150,7 +2694,7 @@ def build_contenders() -> list[Contender]:
             model_id="openai/gpt-5.4-mini",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.75, cost_output=4.50,
-            params_b=30.0,                         # estimated ~30B dense
+            params_b=30.0, context_k=1024,
             club="🔬", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2159,7 +2703,7 @@ def build_contenders() -> list[Contender]:
             model_id="google/gemini-2.5-flash",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.30, cost_output=2.50,
-            params_b=30.0,                         # estimated ~30B dense
+            params_b=30.0, context_k=1024,
             club="⚡", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2168,7 +2712,7 @@ def build_contenders() -> list[Contender]:
             model_id="mistralai/codestral-2508",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.30, cost_output=0.90,
-            params_b=22.0, quant="bf16",
+            params_b=22.0, quant="bf16", context_k=256,
             club="🗡️", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2178,7 +2722,7 @@ def build_contenders() -> list[Contender]:
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.15, cost_output=0.60,
             params_b=400.0, active_params_b=17.0,
-            is_moe=True, quant="bf16",
+            is_moe=True, quant="bf16", context_k=1024,
             club="🦙", roles=["map", "fill", "oneshot"],
         ),
         # ── Cloud paid – high-end ──
@@ -2188,7 +2732,7 @@ def build_contenders() -> list[Contender]:
             model_id="anthropic/claude-sonnet-4.6",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=3.0, cost_output=15.0,
-            params_b=70.0,                         # estimated ~70B dense
+            params_b=70.0, context_k=1024,
             club="🎭", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2197,7 +2741,7 @@ def build_contenders() -> list[Contender]:
             model_id="anthropic/claude-haiku-4.5",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=1.0, cost_output=5.0,
-            params_b=20.0,                         # estimated ~20B
+            params_b=20.0, context_k=200,
             club="🎋", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2206,7 +2750,7 @@ def build_contenders() -> list[Contender]:
             model_id="openai/gpt-5.4",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=2.50, cost_output=15.0,
-            params_b=200.0,                        # estimated ~200B dense
+            params_b=200.0, context_k=1024,
             club="🏛️", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2216,7 +2760,7 @@ def build_contenders() -> list[Contender]:
             endpoint="https://openrouter.ai/api/v1",
             cost_input=1.25, cost_output=10.0,
             params_b=175.0, active_params_b=50.0,
-            is_moe=True,
+            is_moe=True, context_k=1024,
             club="🌟", roles=["map", "fill", "oneshot"],
         ),
         # ── Cloud paid – small / efficient ──
@@ -2226,7 +2770,7 @@ def build_contenders() -> list[Contender]:
             model_id="microsoft/phi-4",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.07, cost_output=0.14,
-            params_b=14.0,
+            params_b=14.0, context_k=16,
             club="🔮", roles=["fill", "oneshot"],
         ),
         Contender(
@@ -2235,7 +2779,7 @@ def build_contenders() -> list[Contender]:
             model_id="mistralai/devstral-small",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.10, cost_output=0.30,
-            params_b=24.0,
+            params_b=24.0, context_k=128,
             club="🗡️", roles=["fill", "oneshot"],
         ),
         # ── Cloud paid – reasoning ──
@@ -2246,7 +2790,7 @@ def build_contenders() -> list[Contender]:
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.50, cost_output=2.15,
             params_b=685.0, active_params_b=37.0,
-            is_moe=True, quant="bf16",
+            is_moe=True, quant="bf16", context_k=128,
             club="🧩", roles=["map", "oneshot"],
         ),
         Contender(
@@ -2256,7 +2800,7 @@ def build_contenders() -> list[Contender]:
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.15, cost_output=0.75,
             params_b=685.0, active_params_b=37.0,
-            is_moe=True, quant="bf16",
+            is_moe=True, quant="bf16", context_k=128,
             club="💎", roles=["map", "fill", "oneshot"],
         ),
     ]

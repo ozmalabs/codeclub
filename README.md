@@ -14,16 +14,18 @@ Three tools that compose. Use one, two, or all three.
 
 118 fights. 14 models. 8 tasks (Python + Rust, difficulty 8–55). Real runs, real numbers.
 
-| Model | Pass Rate | Avg Time | Total Cost | Cost/Pass |
+| Model | Pass Rate | Avg Time | Cost/Fight | Cost/Pass |
 |---|---|---|---|---|
-| **rnj-1:8b** Q6_K (local 8B) | **75%** | 11.7s | **$0.00** | **FREE** |
-| **claude-sonnet-4.6** | **80%** | 6.5s | $0.07 | $0.008 |
-| **gpt-5.4** | **75%** | 6.3s | $0.03 | $0.006 |
-| **deepseek-v3.1** bf16 | **75%** | 29.3s | $0.004 | $0.0007 |
-| **codestral-2508** bf16 | 62% | **3.0s** | $0.003 | $0.0007 |
-| gpt-5.4-nano | 50% | 5.7s | $0.002 | $0.0004 |
-| devstral-small | 38% | **2.7s** | $0.001 | $0.0004 |
-| gemini-2.5-pro | 12% | 34.1s | **$0.25** | **$0.25** |
+| **rnj-1:8b** Q6_K *(Arc B580)* | **75%** | 11.7s | $0.00017¹ | $0.00023¹ |
+| **claude-sonnet-4.6** | **80%** | 6.5s | $0.008 | $0.008 |
+| **gpt-5.4** | **75%** | 6.3s | $0.004 | $0.006 |
+| **deepseek-v3.1** bf16 | **75%** | 29.3s | $0.0005 | $0.0007 |
+| **codestral-2508** bf16 | 62% | **3.0s** | $0.0004 | $0.0007 |
+| gpt-5.4-nano | 50% | 5.7s | $0.0003 | $0.0004 |
+| devstral-small | 38% | **2.7s** | $0.0001 | $0.0004 |
+| gemini-2.5-pro | 12% | 34.1s | $0.032 | **$0.25** |
+
+*¹ Electricity cost at $0.35/kWh (US avg). Arc B580 draws ~150W during inference.*
 
 Caveman pay electricity. Cloud pay rent. Electricity cheaper.
 
