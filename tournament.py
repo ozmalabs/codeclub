@@ -2136,21 +2136,21 @@ def build_contenders() -> list[Contender]:
             club="💎", roles=["map", "fill", "oneshot"],
         ),
         Contender(
-            name="gpt-4.1-nano",
+            name="gpt-5.4-nano",
             kind="openrouter",
-            model_id="openai/gpt-4.1-nano",
+            model_id="openai/gpt-5.4-nano",
             endpoint="https://openrouter.ai/api/v1",
-            cost_input=0.10, cost_output=0.40,
-            params_b=8.0, quant="bf16",       # estimated ~8B dense
+            cost_input=0.20, cost_output=1.25,
+            params_b=8.0,                          # estimated ~8B dense
             club="⚛️", roles=["fill", "oneshot"],
         ),
         Contender(
-            name="gpt-4.1-mini",
+            name="gpt-5.4-mini",
             kind="openrouter",
-            model_id="openai/gpt-4.1-mini",
+            model_id="openai/gpt-5.4-mini",
             endpoint="https://openrouter.ai/api/v1",
-            cost_input=0.40, cost_output=1.60,
-            params_b=30.0, quant="bf16",      # estimated ~30B dense
+            cost_input=0.75, cost_output=4.50,
+            params_b=30.0,                         # estimated ~30B dense
             club="🔬", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2159,7 +2159,7 @@ def build_contenders() -> list[Contender]:
             model_id="google/gemini-2.5-flash",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.30, cost_output=2.50,
-            params_b=30.0, quant="bf16",      # estimated ~30B dense
+            params_b=30.0,                         # estimated ~30B dense
             club="⚡", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2183,12 +2183,12 @@ def build_contenders() -> list[Contender]:
         ),
         # ── Cloud paid – high-end ──
         Contender(
-            name="claude-sonnet-4",
+            name="claude-sonnet-4.6",
             kind="openrouter",
-            model_id="anthropic/claude-sonnet-4",
+            model_id="anthropic/claude-sonnet-4.6",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=3.0, cost_output=15.0,
-            params_b=70.0, quant="bf16",       # estimated ~70B dense
+            params_b=70.0,                         # estimated ~70B dense
             club="🎭", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2197,16 +2197,16 @@ def build_contenders() -> list[Contender]:
             model_id="anthropic/claude-haiku-4.5",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=1.0, cost_output=5.0,
-            params_b=20.0, quant="bf16",       # estimated ~20B
+            params_b=20.0,                         # estimated ~20B
             club="🎋", roles=["map", "fill", "oneshot"],
         ),
         Contender(
-            name="gpt-4.1",
+            name="gpt-5.4",
             kind="openrouter",
-            model_id="openai/gpt-4.1",
+            model_id="openai/gpt-5.4",
             endpoint="https://openrouter.ai/api/v1",
-            cost_input=2.0, cost_output=8.0,
-            params_b=100.0, quant="bf16",      # estimated ~100B dense
+            cost_input=2.50, cost_output=15.0,
+            params_b=200.0,                        # estimated ~200B dense
             club="🏛️", roles=["map", "fill", "oneshot"],
         ),
         Contender(
@@ -2216,7 +2216,7 @@ def build_contenders() -> list[Contender]:
             endpoint="https://openrouter.ai/api/v1",
             cost_input=1.25, cost_output=10.0,
             params_b=175.0, active_params_b=50.0,
-            is_moe=True, quant="bf16",
+            is_moe=True,
             club="🌟", roles=["map", "fill", "oneshot"],
         ),
         # ── Cloud paid – small / efficient ──
@@ -2226,7 +2226,7 @@ def build_contenders() -> list[Contender]:
             model_id="microsoft/phi-4",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.07, cost_output=0.14,
-            params_b=14.0, quant="bf16",
+            params_b=14.0,
             club="🔮", roles=["fill", "oneshot"],
         ),
         Contender(
@@ -2235,10 +2235,10 @@ def build_contenders() -> list[Contender]:
             model_id="mistralai/devstral-small",
             endpoint="https://openrouter.ai/api/v1",
             cost_input=0.10, cost_output=0.30,
-            params_b=24.0, quant="bf16",
+            params_b=24.0,
             club="🗡️", roles=["fill", "oneshot"],
         ),
-        # ── Cloud paid – reasoning / MoE ──
+        # ── Cloud paid – reasoning ──
         Contender(
             name="deepseek-r1",
             kind="openrouter",
@@ -2266,7 +2266,7 @@ def build_contenders() -> list[Contender]:
 ANTHROPIC_PRICING = {
     "opus-4":     {"input": 15.0,  "output": 75.0,  "label": "Claude Opus 4"},
     "sonnet-4.6": {"input": 3.0,   "output": 15.0,  "label": "Claude Sonnet 4.6"},
-    "haiku-3.5":  {"input": 0.80,  "output": 4.0,   "label": "Claude Haiku 3.5"},
+    "haiku-4.5":  {"input": 1.0,   "output": 5.0,   "label": "Claude Haiku 4.5"},
 }
 
 
