@@ -1,0 +1,175 @@
+// Types matching web/api/models.py Pydantic schemas
+
+export type TaskStatus = 'pending' | 'queued' | 'running' | 'review' | 'fixing' | 'done' | 'failed' | 'cancelled';
+export type RunStatus = 'running' | 'passed' | 'failed';
+export type Phase = 'spec' | 'generate' | 'test' | 'review' | 'fix' | 'commit';
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  priority: number;
+  setup: string;
+  stack: string | null;
+  language: string;
+  budget: string;
+  complexity: string | null;
+  git_enabled: boolean;
+  branch: string | null;
+  worktree_path: string | null;
+  pr_url: string | null;
+  phases: PhaseInfo[];
+  review: ReviewResult | null;
+  ledger: TaskLedger | null;
+  error: string | null;
+  fix_rounds: number;
+  max_fix_rounds: number;
+  map_model: string | null;
+  fill_model: string | null;
+  review_model: string | null;
+  parent_task_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface TaskCreate {
+  title: string;
+  description: string;
+  priority?: number;
+  setup?: string;
+  stack?: string;
+  language?: string;
+  budget?: string;
+  git_enabled?: boolean;
+  max_fix_rounds?: number;
+}
+
+export interface PhaseInfo {
+  phase: Phase;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  started_at: string | null;
+  elapsed_s: number | null;
+  tokens: number | null;
+}
+
+export interface ReviewResult {
+  passed: boolean;
+  quality: number;
+  issues: string[];
+}
+
+export interface TaskLedger {
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+  elapsed_s: number;
+}
+
+export interface Run {
+  id: number;
+  task_id: string;
+  attempt: number;
+  status: RunStatus;
+  phases: PhaseInfo[];
+  code_snapshot: string | null;
+  test_output: string | null;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+  elapsed_s: number;
+  created_at: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+  params_b: number | null;
+  active_params_b: number | null;
+  quant: string | null;
+  is_moe: boolean;
+  context_window: number;
+  cost_per_mtok_in: number | null;
+  cost_per_mtok_out: number | null;
+  smash_range: SmashRange | null;
+  endpoint: string | null;
+  alive: boolean;
+}
+
+export interface SmashRange {
+  low: number;
+  sweet: number;
+  high: number;
+  min_clarity: number;
+}
+
+export interface SmashCoord {
+  difficulty: number;
+  clarity: number;
+}
+
+export interface SmashGridPoint {
+  difficulty: number;
+  clarity: number;
+  efficiency: number;
+}
+
+export interface DashboardData {
+  queue_depth: number;
+  active_runs: number;
+  completed_today: number;
+  failed_today: number;
+  total_cost_today: number;
+  hardware_status: HardwareEndpoint[];
+  recent_activity: ActivityEvent[];
+}
+
+export interface HardwareEndpoint {
+  name: string;
+  url: string;
+  alive: boolean;
+  response_ms: number | null;
+  last_checked: string | null;
+}
+
+export interface ActivityEvent {
+  id: number;
+  event: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  detail: string | null;
+  created_at: string;
+}
+
+export interface Setting {
+  key: string;
+  value: string;
+}
+
+export interface TournamentResult {
+  id: number;
+  task_id: string;
+  mode: string;
+  model: string;
+  mapper: string | null;
+  quality: number;
+  tests_passed: number;
+  tests_total: number;
+  elapsed_s: number;
+  cost_usd: number;
+  energy_j: number | null;
+  smash_fit: number;
+  smash_measured: number | null;
+  fitness: number;
+  created_at: string;
+}
+
+// SSE event types
+export type SSEEvent =
+  | { type: 'phase'; data: PhaseInfo }
+  | { type: 'log'; data: { message: string } }
+  | { type: 'test'; data: { name: string; passed: boolean; error?: string } }
+  | { type: 'code'; data: { code: string } }
+  | { type: 'done'; data: { status: string; quality: number; cost: number } };

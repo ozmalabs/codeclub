@@ -8,3 +8,4 @@ chroma_data/
 dist/
 .pytest_cache/
 .env
+web/data/

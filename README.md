@@ -129,15 +129,60 @@ internet? No problem.
 
 Six providers. Zero config for local, one env var for cloud.
 
-| Provider | Auth |
-|---|---|
-| Anthropic | `ANTHROPIC_API_KEY` |
-| OpenRouter | `OPENROUTER_API_KEY` |
-| GitHub Copilot SDK | `gh auth login` or `GITHUB_TOKEN` |
-| GitHub Models | `GITHUB_TOKEN` |
-| Ollama / llama.cpp | none |
-
 → [How routing works](docs/routing.md)
+
+## Club Smash — right-sizing models to tasks
+
+> You don't use a sledgehammer to crack a nut. Club Smash finds the right club.
+
+Every model has an efficiency map — like a turbo compressor map. Two axes:
+**difficulty** (how hard) and **clarity** (how well-specified). The sweet spot
+is where the model is right-sized. Outside it, the model is either overkill or
+overwhelmed.
+
+Roles aren't special code paths — they're just coordinates on this plane:
+
+| Role | Difficulty offset | Clarity | What it means |
+|---|---|---|---|
+| `fill` | −10 | 90 | Skeleton → code. Very clear, easier. |
+| `map` | 0 | 70 | NL → architecture. Baseline difficulty. |
+| `oneshot` | +10 | 65 | NL → complete code. Harder, less clear. |
+| `review` | −5 | 75 | Check existing code. Moderate. |
+
+### Efficiency maps
+
+<table>
+<tr>
+<td width="50%">
+<strong>rnj-1:8b</strong> (8B, Q6_K, B580 GPU)<br>
+Tight island around 35d. Nails easy-moderate tasks with clear specs.<br>
+<img src="benchmarks/maps/rnj-1-8b.png" alt="rnj-1:8b efficiency map" width="100%">
+</td>
+<td width="50%">
+<strong>qwen3-coder:30b</strong> (30B, Q4_K_M, CPU)<br>
+Wide plateau. Handles ambiguity, covers most of the task space.<br>
+<img src="benchmarks/maps/qwen3-coder-30b.png" alt="qwen3-coder:30b efficiency map" width="100%">
+</td>
+</tr>
+</table>
+
+**Model overlay** — all models on one chart. Find the gaps, find the overlaps.
+
+<img src="benchmarks/maps/overlay.png" alt="Model efficiency overlay" width="700">
+
+**Quantization comparison** — same model, different quants. See how much
+capability you lose stepping down from bf16 → Q4_K_M → Q2_K.
+
+<img src="benchmarks/maps/quant_gemma4-26b-a4b.png" alt="Gemma4 quantization comparison" width="700">
+
+```bash
+python smash_viz.py                           # generate all maps
+python smash_viz.py --quant-compare rnj-1:8b  # compare quants
+python smash_server.py                        # interactive browser
+python tournament.py --map                    # ASCII in terminal
+```
+
+→ [How Club Smash works](docs/club-smash.md)
 
 ## Agent plugin
 
@@ -170,6 +215,7 @@ pip install codeclub-infra    # routing only
 - [Compression](docs/compression.md) — tree-sitter stubbing, semantic retrieval, brevity constraints
 - [Dev loop](docs/dev-loop.md) — pipeline, fix loop, benchmarks, accounting
 - [Routing](docs/routing.md) — hardware declaration, setup presets, providers, dynamic levers
+- [Club Smash](docs/club-smash.md) — two-axis model routing, efficiency maps, right-sizing
 - [Benchmarks](docs/benchmarks.md) — full results, reproduction steps, methodology
 - [Architecture](docs/architecture.md) — file map, references
 
@@ -185,3 +231,7 @@ pip install codeclub-infra    # routing only
 If caveman save you mass token, mass money — leave mass star. ⭐
 
 [![Star History Chart](https://api.star-history.com/svg?repos=ozmalabs/codeclub&type=Date)](https://star-history.com/#ozmalabs/codeclub&Date)
+
+---
+
+Brought to you by [Ozma](https://ozmalabs.com) from [ozmalabs.com](https://ozmalabs.com).
