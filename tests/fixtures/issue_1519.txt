@@ -1,0 +1,41 @@
+## Problem
+
+When a referral payment is approved and committed to the wallet, the Stripe Transfer is
+created with creation-time metadata only — approval-time fields such as
+`reviewpay_transaction_type: referral_reward` and platform fee details are never recorded
+on the transfer.
+
+This makes referral transactions indistinguishable from other transfer types in the Stripe
+dashboard and omits fee details that are recorded for review cashback transactions.
+
+### Root cause
+
+`wallet_bridge.commit_wallet_transaction` called `provider.commit_inflight(transaction_id)`
+without forwarding the `meta_data` argument. Inside `StripeWalletProvider.commit_inflight`,
+only `pending.meta_data` (baked in at creation time) was used to build the Stripe Transfer
+metadata, so approval-time enrichments were silently dropped.
+
+For BLNK: the commit endpoint does not accept metadata, so metadata must be updated via a
+separate API call before committing. Previously, no such call was made for referral payments.
+
+## Fix
+
+- `WalletProvider.commit_inflight` / `NullWalletProvider` — add `meta_data` kwarg to abstract contract
+- `wallet_bridge.commit_wallet_transaction` — forward `meta_data` to `provider.commit_inflight`
+- `StripeWalletProvider.commit_inflight` — merge approval-time `meta_data` into `transfer_meta`
+  before Stripe Transfer creation; persist merged metadata to the DB row
+- `BlnkWalletProvider.commit_inflight` — accept (and ignore) `meta_data` kwarg; BLNK path uses
+  separate pre-commit metadata update
+- `LocalWalletProvider.commit_inflight` — merge `meta_data` into row before status flip
+- `referrals.approve_referral_payment` — add `reviewpay_transaction_type: referral_reward` to
+  referral metadata; call BLNK metadata update before commit when provider is BLNK
+
+## Files changed
+
+- `backend/app/services/wallet_provider.py`
+- `backend/app/services/wallet_bridge.py`
+- `backend/app/services/wallet_blnk.py`
+- `backend/app/services/wallet_local.py`
+- `backend/app/services/wallet_stripe.py`
+- `backend/app/services/referrals.py`
+- `backend/tests/test_referral_payments.py`
