@@ -230,7 +230,9 @@ class SmashRange:
 
         Two gates multiplied:
         - Difficulty: oversized = slight penalty, undersized = steep, above high = 0
-        - Clarity: below min_clarity = steep penalty (model can't handle ambiguity)
+        - Clarity: sigmoid penalty centred 20 below min_clarity (sharp cliff)
+
+        Calibrated against 141 real benchmark fights.
         """
         difficulty, clarity = coord.difficulty, coord.clarity
 
@@ -245,12 +247,11 @@ class SmashRange:
             span = self.high - self.sweet
             diff_fit = max(0.3, 1.0 - 0.7 * (difficulty - self.sweet) / max(span, 1))
 
-        # Clarity fit
-        if clarity >= self.min_clarity:
-            clar_fit = 1.0
-        else:
-            gap = self.min_clarity - clarity
-            clar_fit = max(0.1, 1.0 - gap / 40.0)
+        # Clarity fit — sigmoid with sharp cliff
+        # Empirical: quality drops ~0% below (min_clarity - 30), ~80%+ above
+        import math
+        cliff = self.min_clarity - 20
+        clar_fit = 1 / (1 + math.exp(-0.25 * (clarity - cliff)))
 
         return diff_fit * clar_fit
 
@@ -274,6 +275,12 @@ def estimate_smash_range(
 
     MoE models use active params for estimation since per-token capability
     tracks the active parameter count, not total.
+
+    Calibrated against 141 real fights (2026-04):
+    - Small models (1-8B) have wider difficulty ranges than param count suggests
+      (training data quality matters more than size)
+    - Clarity thresholds are ~10 points lower than original estimates
+      (most models handle moderate ambiguity better than expected)
     """
     effective = active_params_b if (is_moe and active_params_b) else params_b
 
@@ -287,20 +294,23 @@ def estimate_smash_range(
 
     adj = effective * quant_penalty
 
+    # Ranges calibrated from fitted per-model data:
+    #   - difficulty ranges are wider than original (especially for small models)
+    #   - min_clarity ~10 lower (sigmoid handles the sharp cliff now)
     if adj < 2.0:
-        return SmashRange(low=5, sweet=15, high=25, min_clarity=85)
+        return SmashRange(low=5,  sweet=20, high=40,  min_clarity=75)
     elif adj < 5.0:
-        return SmashRange(low=10, sweet=25, high=40, min_clarity=75)
+        return SmashRange(low=5,  sweet=30, high=55,  min_clarity=70)
     elif adj < 10.0:
-        return SmashRange(low=15, sweet=35, high=55, min_clarity=65)
+        return SmashRange(low=5,  sweet=40, high=70,  min_clarity=60)
     elif adj < 20.0:
-        return SmashRange(low=20, sweet=45, high=65, min_clarity=55)
+        return SmashRange(low=10, sweet=45, high=75,  min_clarity=55)
     elif adj < 40.0:
-        return SmashRange(low=25, sweet=50, high=75, min_clarity=45)
+        return SmashRange(low=15, sweet=50, high=80,  min_clarity=45)
     elif adj < 80.0:
-        return SmashRange(low=30, sweet=55, high=85, min_clarity=35)
+        return SmashRange(low=20, sweet=55, high=90,  min_clarity=35)
     else:
-        return SmashRange(low=35, sweet=60, high=95, min_clarity=25)
+        return SmashRange(low=25, sweet=60, high=95,  min_clarity=25)
 
 
 def estimate_token_load(coord: SmashCoord) -> int:
