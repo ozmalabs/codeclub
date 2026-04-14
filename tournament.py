@@ -757,6 +757,18 @@ class TournamentTask:
     def runner(self) -> LanguageRunner:
         return RUNNERS[self.lang]
 
+    @property
+    def content_hash(self) -> str:
+        """Hash of spec + tests — changes when the task is meaningfully modified."""
+        import hashlib
+        parts = [self.id, self.lang, self.description, self.expected_class]
+        parts += self.methods
+        for name, code in self.tests:
+            parts += [name, code]
+        parts.append(str(self.base_difficulty))
+        parts.append(str(self.spec_clarity))
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
 
 TASKS: dict[str, TournamentTask] = {}
 
@@ -2488,6 +2500,407 @@ TASKS["min-stack-mid"] = TournamentTask(
 )
 
 
+# ---------------------------------------------------------------------------
+# FRONTIER TASKS — wildly underspecified, massively difficult.
+#
+# These separate frontier models from good-enough models.  The spec is
+# intentionally one or two sentences — the model must infer the entire
+# design.  Tests check structural/behavioral properties, not exact output.
+#
+# Assessment strategy:
+#   We can't test "does this make $1bn" — but we CAN test whether the
+#   model produced something *architecturally sound* for the domain:
+#     - Does it compile / parse?
+#     - Does it have the right abstractions? (routes, models, handlers)
+#     - Do the basics actually work? (CRUD, auth, persistence)
+#     - Did it handle the obvious edge case the spec didn't mention?
+#
+#   This is graduated scoring: 2/8 tests passing is still useful data.
+#   A model that produces a working CRUD app from "build me a SaaS" is
+#   clearly more capable than one that produces a hello-world.
+#
+# Token/time caps:
+#   These tasks get max_tokens=12000 and wall_time cutoff in the runner.
+#   We're testing capability, not willingness to burn money.
+# ---------------------------------------------------------------------------
+
+# --- URL shortener: vague frontier (diff=65, clarity=15) -----------------
+# Well-understood problem but zero guidance on API, storage, collision handling.
+TASKS["url-shortener-vague"] = TournamentTask(
+    id="url-shortener-vague",
+    name="URLShortener",
+    lang="python",
+    description="Make a URL shortener.",
+    expected_class="URLShortener",
+    methods=[],
+    tests=[
+        ("shorten_and_resolve", textwrap.dedent("""\
+            s = URLShortener()
+            short = s.shorten("https://example.com/very/long/path")
+            assert isinstance(short, str)
+            assert len(short) < 20
+            assert s.resolve(short) == "https://example.com/very/long/path"
+        """)),
+        ("same_url_same_code", textwrap.dedent("""\
+            s = URLShortener()
+            a = s.shorten("https://example.com")
+            b = s.shorten("https://example.com")
+            assert a == b
+        """)),
+        ("different_urls_different_codes", textwrap.dedent("""\
+            s = URLShortener()
+            a = s.shorten("https://a.com")
+            b = s.shorten("https://b.com")
+            assert a != b
+        """)),
+        ("resolve_unknown", textwrap.dedent("""\
+            s = URLShortener()
+            result = s.resolve("nonexistent")
+            assert result is None
+        """)),
+        ("stats_tracking", textwrap.dedent("""\
+            s = URLShortener()
+            code = s.shorten("https://example.com")
+            s.resolve(code)
+            s.resolve(code)
+            stats = s.stats(code)
+            assert stats["clicks"] >= 2
+        """)),
+        ("custom_alias", textwrap.dedent("""\
+            s = URLShortener()
+            code = s.shorten("https://example.com", alias="my-link")
+            assert code == "my-link"
+            assert s.resolve("my-link") == "https://example.com"
+        """)),
+    ],
+    base_difficulty=65,
+    spec_clarity=15,
+)
+
+# --- Task queue: vague frontier (diff=72, clarity=15) --------------------
+# Needs priority, retry logic, concurrency awareness — none mentioned.
+TASKS["task-queue-vague"] = TournamentTask(
+    id="task-queue-vague",
+    name="TaskQueue",
+    lang="python",
+    description="Build a task queue with priorities and retries.",
+    expected_class="TaskQueue",
+    methods=[],
+    tests=[
+        ("enqueue_dequeue", textwrap.dedent("""\
+            q = TaskQueue()
+            q.enqueue("task-1", payload={"x": 1})
+            task = q.dequeue()
+            assert task["id"] == "task-1"
+            assert task["payload"] == {"x": 1}
+        """)),
+        ("priority_ordering", textwrap.dedent("""\
+            q = TaskQueue()
+            q.enqueue("low", priority=1)
+            q.enqueue("high", priority=10)
+            q.enqueue("mid", priority=5)
+            assert q.dequeue()["id"] == "high"
+            assert q.dequeue()["id"] == "mid"
+            assert q.dequeue()["id"] == "low"
+        """)),
+        ("empty_returns_none", textwrap.dedent("""\
+            q = TaskQueue()
+            assert q.dequeue() is None
+        """)),
+        ("retry_on_fail", textwrap.dedent("""\
+            q = TaskQueue()
+            q.enqueue("flaky", max_retries=2)
+            task = q.dequeue()
+            q.fail(task["id"])
+            task2 = q.dequeue()
+            assert task2["id"] == "flaky"
+            assert task2["retries"] == 1
+        """)),
+        ("max_retries_exhausted", textwrap.dedent("""\
+            q = TaskQueue()
+            q.enqueue("doomed", max_retries=1)
+            task = q.dequeue()
+            q.fail(task["id"])
+            task = q.dequeue()
+            q.fail(task["id"])
+            # After max retries, task should be dead-lettered
+            assert q.dequeue() is None
+            assert len(q.dead_letter()) >= 1
+        """)),
+        ("complete_removes", textwrap.dedent("""\
+            q = TaskQueue()
+            q.enqueue("done-task")
+            task = q.dequeue()
+            q.complete(task["id"])
+            assert q.dequeue() is None
+            assert q.size() == 0
+        """)),
+        ("size_tracking", textwrap.dedent("""\
+            q = TaskQueue()
+            q.enqueue("a")
+            q.enqueue("b")
+            assert q.size() == 2
+            q.dequeue()
+            assert q.size() == 1
+        """)),
+    ],
+    base_difficulty=72,
+    spec_clarity=15,
+)
+
+# --- KV store with TTL: vague frontier (diff=60, clarity=20) -------------
+# "Store stuff with expiry" — must infer TTL semantics, cleanup, defaults.
+TASKS["kv-store-vague"] = TournamentTask(
+    id="kv-store-vague",
+    name="KVStore",
+    lang="python",
+    description="A key-value store where entries can expire.",
+    expected_class="KVStore",
+    methods=[],
+    tests=[
+        ("basic_set_get", textwrap.dedent("""\
+            kv = KVStore()
+            kv.set("key1", "value1")
+            assert kv.get("key1") == "value1"
+        """)),
+        ("missing_key", textwrap.dedent("""\
+            kv = KVStore()
+            assert kv.get("nope") is None
+        """)),
+        ("ttl_expiry", textwrap.dedent("""\
+            import time
+            kv = KVStore()
+            kv.set("temp", "data", ttl=0.1)
+            assert kv.get("temp") == "data"
+            time.sleep(0.15)
+            assert kv.get("temp") is None
+        """)),
+        ("overwrite", textwrap.dedent("""\
+            kv = KVStore()
+            kv.set("k", "v1")
+            kv.set("k", "v2")
+            assert kv.get("k") == "v2"
+        """)),
+        ("delete", textwrap.dedent("""\
+            kv = KVStore()
+            kv.set("k", "v")
+            kv.delete("k")
+            assert kv.get("k") is None
+        """)),
+        ("keys_listing", textwrap.dedent("""\
+            kv = KVStore()
+            kv.set("a", 1)
+            kv.set("b", 2)
+            assert sorted(kv.keys()) == ["a", "b"]
+        """)),
+        ("no_ttl_persists", textwrap.dedent("""\
+            import time
+            kv = KVStore()
+            kv.set("permanent", "data")
+            time.sleep(0.1)
+            assert kv.get("permanent") == "data"
+        """)),
+    ],
+    base_difficulty=60,
+    spec_clarity=20,
+)
+
+# --- Markdown to HTML: vague frontier (diff=68, clarity=10) ---------------
+# "Convert markdown" — must figure out which subset, edge cases, nesting.
+TASKS["markdown-vague"] = TournamentTask(
+    id="markdown-vague",
+    name="MarkdownParser",
+    lang="python",
+    description="Convert markdown text to HTML.",
+    expected_class="MarkdownParser",
+    methods=[],
+    tests=[
+        ("headings", textwrap.dedent("""\
+            p = MarkdownParser()
+            assert "<h1>Title</h1>" in p.render("# Title")
+            assert "<h2>Sub</h2>" in p.render("## Sub")
+        """)),
+        ("bold_italic", textwrap.dedent("""\
+            p = MarkdownParser()
+            html = p.render("**bold** and *italic*")
+            assert "<strong>bold</strong>" in html
+            assert "<em>italic</em>" in html
+        """)),
+        ("links", textwrap.dedent("""\
+            p = MarkdownParser()
+            html = p.render("[click](https://example.com)")
+            assert '<a href="https://example.com">click</a>' in html
+        """)),
+        ("code_blocks", textwrap.dedent("""\
+            p = MarkdownParser()
+            html = p.render("```\\ncode here\\n```")
+            assert "<code>" in html or "<pre>" in html
+            assert "code here" in html
+        """)),
+        ("unordered_list", textwrap.dedent("""\
+            p = MarkdownParser()
+            html = p.render("- one\\n- two\\n- three")
+            assert "<ul>" in html
+            assert "<li>" in html
+            assert "one" in html
+        """)),
+        ("inline_code", textwrap.dedent("""\
+            p = MarkdownParser()
+            html = p.render("use `print()` here")
+            assert "<code>print()</code>" in html
+        """)),
+        ("paragraphs", textwrap.dedent("""\
+            p = MarkdownParser()
+            html = p.render("first\\n\\nsecond")
+            assert html.count("<p>") >= 2 or html.count("<p ") >= 2
+        """)),
+    ],
+    base_difficulty=68,
+    spec_clarity=10,
+)
+
+# --- The big one: "Build me a SaaS" (diff=95, clarity=5) -----------------
+# This is deliberately absurd.  The spec gives almost nothing.
+# We test: did you produce anything that remotely resembles a web app?
+# This is the ultimate frontier separator — only the best models will
+# produce something that passes even 2-3 of these structural checks.
+TASKS["saas-vague"] = TournamentTask(
+    id="saas-vague",
+    name="SaaSApp",
+    lang="python",
+    description="Build a SaaS application backend.",
+    expected_class="SaaSApp",
+    methods=[],
+    tests=[
+        ("instantiates", textwrap.dedent("""\
+            app = SaaSApp()
+            assert app is not None
+        """)),
+        ("has_users", textwrap.dedent("""\
+            app = SaaSApp()
+            user = app.create_user(email="test@example.com", name="Test")
+            assert user is not None
+            assert "id" in user or hasattr(user, "id")
+        """)),
+        ("user_lookup", textwrap.dedent("""\
+            app = SaaSApp()
+            app.create_user(email="a@b.com", name="Alice")
+            found = app.get_user(email="a@b.com")
+            assert found is not None
+        """)),
+        ("duplicate_user_rejected", textwrap.dedent("""\
+            app = SaaSApp()
+            app.create_user(email="dup@test.com", name="First")
+            try:
+                app.create_user(email="dup@test.com", name="Second")
+                assert False, "should reject duplicate email"
+            except Exception:
+                pass
+        """)),
+        ("has_resource_crud", textwrap.dedent("""\
+            app = SaaSApp()
+            user = app.create_user(email="u@t.com", name="U")
+            uid = user["id"] if isinstance(user, dict) else user.id
+            item = app.create_item(user_id=uid, name="Widget", data={"price": 9.99})
+            assert item is not None
+            items = app.list_items(user_id=uid)
+            assert len(items) >= 1
+        """)),
+        ("resource_isolation", textwrap.dedent("""\
+            app = SaaSApp()
+            u1 = app.create_user(email="u1@t.com", name="U1")
+            u2 = app.create_user(email="u2@t.com", name="U2")
+            uid1 = u1["id"] if isinstance(u1, dict) else u1.id
+            uid2 = u2["id"] if isinstance(u2, dict) else u2.id
+            app.create_item(user_id=uid1, name="Private", data={})
+            items = app.list_items(user_id=uid2)
+            assert len(items) == 0
+        """)),
+        ("delete_item", textwrap.dedent("""\
+            app = SaaSApp()
+            user = app.create_user(email="d@t.com", name="D")
+            uid = user["id"] if isinstance(user, dict) else user.id
+            item = app.create_item(user_id=uid, name="Gone", data={})
+            iid = item["id"] if isinstance(item, dict) else item.id
+            app.delete_item(item_id=iid)
+            items = app.list_items(user_id=uid)
+            assert len(items) == 0
+        """)),
+    ],
+    base_difficulty=95,
+    spec_clarity=5,
+)
+
+# --- Rust: build me a database (diff=90, clarity=10) ----------------------
+# In-memory DB with SQL-ish queries.  Absurdly underspecified.
+TASKS["rust-minidb-vague"] = TournamentTask(
+    id="rust-minidb-vague",
+    name="MiniDB",
+    lang="rust",
+    description="Build a simple in-memory database that supports basic queries.",
+    expected_class="MiniDB",
+    methods=[],
+    tests=[
+        ("create_table_insert", textwrap.dedent("""\
+            fn main() {
+                let mut db = MiniDB::new();
+                db.create_table("users", &["name", "age"]);
+                db.insert("users", &["Alice", "30"]);
+                db.insert("users", &["Bob", "25"]);
+                let rows = db.select("users", None);
+                assert_eq!(rows.len(), 2);
+            }
+        """)),
+        ("select_with_filter", textwrap.dedent("""\
+            fn main() {
+                let mut db = MiniDB::new();
+                db.create_table("items", &["name", "price"]);
+                db.insert("items", &["Apple", "1"]);
+                db.insert("items", &["Banana", "2"]);
+                db.insert("items", &["Cherry", "3"]);
+                let rows = db.select("items", Some(("price", "2")));
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], "Banana");
+            }
+        """)),
+        ("delete_rows", textwrap.dedent("""\
+            fn main() {
+                let mut db = MiniDB::new();
+                db.create_table("t", &["x"]);
+                db.insert("t", &["1"]);
+                db.insert("t", &["2"]);
+                db.delete("t", ("x", "1"));
+                let rows = db.select("t", None);
+                assert_eq!(rows.len(), 1);
+            }
+        """)),
+        ("multiple_tables", textwrap.dedent("""\
+            fn main() {
+                let mut db = MiniDB::new();
+                db.create_table("a", &["col"]);
+                db.create_table("b", &["col"]);
+                db.insert("a", &["x"]);
+                db.insert("b", &["y"]);
+                assert_eq!(db.select("a", None).len(), 1);
+                assert_eq!(db.select("b", None).len(), 1);
+            }
+        """)),
+        ("count", textwrap.dedent("""\
+            fn main() {
+                let mut db = MiniDB::new();
+                db.create_table("t", &["v"]);
+                for i in 0..10 {
+                    db.insert("t", &[&i.to_string()]);
+                }
+                assert_eq!(db.count("t"), 10);
+            }
+        """)),
+    ],
+    base_difficulty=90,
+    spec_clarity=10,
+)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONTENDERS — models with hardware / cost / MoE metadata
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3196,7 +3609,8 @@ def fight_tiered(
     return result
 
 
-def fight_oneshot(contender: Contender, task: TournamentTask) -> FightResult:
+def fight_oneshot(contender: Contender, task: TournamentTask,
+                  max_tokens: int = 4000) -> FightResult:
     """Single model does everything in one call."""
     result = FightResult(
         task_id=task.id, mode="oneshot",
@@ -3205,7 +3619,7 @@ def fight_oneshot(contender: Contender, task: TournamentTask) -> FightResult:
         locality=contender.locality,
     )
 
-    res = call_model(contender, _oneshot_messages(task), max_tokens=4000)
+    res = call_model(contender, _oneshot_messages(task), max_tokens=max_tokens)
     if res.error:
         result.error = f"api_error: {res.error}"
         return result
