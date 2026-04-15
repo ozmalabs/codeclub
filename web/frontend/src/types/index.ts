@@ -4,7 +4,30 @@ export type TaskStatus = 'pending' | 'queued' | 'running' | 'review' | 'fixing' 
 export type RunStatus = 'running' | 'passed' | 'failed';
 export type Phase = 'spec' | 'generate' | 'test' | 'review' | 'fix' | 'commit';
 
-export interface Task {
+export interface ReviewResult {
+  passed: boolean;
+  quality: number;
+  issues: string[];
+}
+
+export interface TaskLedger {
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+  elapsed_s: number;
+}
+
+export interface PhaseInfo {
+  phase: Phase;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  started_at: string | null;
+  elapsed_s: number | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  error: string | null;
+}
+
+interface TaskBase {
   id: string;
   title: string;
   description: string;
@@ -20,8 +43,6 @@ export interface Task {
   worktree_path: string | null;
   pr_url: string | null;
   phases: PhaseInfo[];
-  review: ReviewResult | null;
-  ledger: TaskLedger | null;
   error: string | null;
   fix_rounds: number;
   max_fix_rounds: number;
@@ -32,6 +53,23 @@ export interface Task {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  final_code: string | null;
+  test_output: string | null;
+}
+
+export interface Task extends TaskBase {
+  review: ReviewResult | null;
+  ledger: TaskLedger | null;
+}
+
+export interface TaskRawResponse extends TaskBase {
+  review_json: Record<string, unknown> | null;
+  ledger_json: Record<string, unknown> | null;
+}
+
+export interface TaskListResponse {
+  tasks: TaskRawResponse[];
+  total: number;
 }
 
 export interface TaskCreate {
@@ -46,25 +84,9 @@ export interface TaskCreate {
   max_fix_rounds?: number;
 }
 
-export interface PhaseInfo {
-  phase: Phase;
-  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
-  started_at: string | null;
-  elapsed_s: number | null;
-  tokens: number | null;
-}
-
-export interface ReviewResult {
-  passed: boolean;
-  quality: number;
-  issues: string[];
-}
-
-export interface TaskLedger {
-  tokens_in: number;
-  tokens_out: number;
-  cost_usd: number;
-  elapsed_s: number;
+export interface PipelineStatus {
+  paused: boolean;
+  queue_depth: number;
 }
 
 export interface Run {

@@ -1,11 +1,21 @@
+import type {
+  PipelineStatus,
+  SSEEvent,
+  Task,
+  TaskCreate,
+  TaskListResponse,
+  TaskRawResponse,
+  TaskSSEEvent,
+} from '../types';
+
 const BASE = '/api';
 
 function ensureSlash(path: string): string {
   if (path.includes('?')) {
     const [p, q] = path.split('?', 2);
-    return `${p.endsWith('/') ? p : p + '/'}?${q}`;
+    return `${p.endsWith('/') ? p : `${p}/`}?${q}`;
   }
-  return path.endsWith('/') ? path : path + '/';
+  return path.endsWith('/') ? path : `${path}/`;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -17,23 +27,70 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await res.text();
     throw new Error(`${res.status}: ${body}`);
   }
-  return res.json();
+  if (res.status === 204) {
+    return undefined as T;
+  }
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+function normalizeTask(task: TaskRawResponse): Task {
+  const { review_json, ledger_json, ...rest } = task;
+  const review = review_json
+    ? {
+        passed: !!review_json.approved,
+        quality: (review_json.score as number) ?? 0,
+        issues: (review_json.issues as string[]) ?? [],
+      }
+    : null;
+  const ledger = ledger_json
+    ? {
+        tokens_in: ((ledger_json.total_tokens_in ?? ledger_json.tokens_in ?? 0) as number),
+        tokens_out: ((ledger_json.total_tokens_out ?? ledger_json.tokens_out ?? 0) as number),
+        cost_usd: ((ledger_json.total_cost_usd ?? ledger_json.cost_usd ?? 0) as number),
+        elapsed_s: ((ledger_json.total_time_s ?? ledger_json.elapsed_s ?? 0) as number),
+      }
+    : null;
+  return { ...rest, review, ledger };
 }
 
 // Tasks
 export const api = {
   tasks: {
-    list: (status?: string) =>
-      request<import('../types').Task[]>(`/tasks${status ? `?status=${status}` : ''}`),
-    get: (id: string) => request<import('../types').Task>(`/tasks/${id}`),
-    create: (data: import('../types').TaskCreate) =>
-      request<import('../types').Task>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
-    update: (id: string, data: Partial<import('../types').TaskCreate>) =>
-      request<import('../types').Task>(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    list: async (status?: string) => {
+      const data = await request<TaskRawResponse[] | TaskListResponse>(
+        `/tasks${status ? `?status=${status}` : ''}`,
+      );
+      const tasks = Array.isArray(data) ? data : data.tasks;
+      return tasks.map(normalizeTask);
+    },
+    get: async (id: string) => normalizeTask(await request<TaskRawResponse>(`/tasks/${id}`)),
+    create: async (data: TaskCreate) =>
+      normalizeTask(await request<TaskRawResponse>('/tasks', { method: 'POST', body: JSON.stringify(data) })),
+    update: async (id: string, data: Partial<TaskCreate>) =>
+      normalizeTask(
+        await request<TaskRawResponse>(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+      ),
     delete: (id: string) => request<void>(`/tasks/${id}`, { method: 'DELETE' }),
-    run: (id: string) => request<import('../types').Task>(`/tasks/${id}/run`, { method: 'POST' }),
-    cancel: (id: string) => request<import('../types').Task>(`/tasks/${id}/cancel`, { method: 'POST' }),
-    retry: (id: string) => request<import('../types').Task>(`/tasks/${id}/retry`, { method: 'POST' }),
+    run: async (id: string) =>
+      normalizeTask(await request<TaskRawResponse>(`/tasks/${id}/run`, { method: 'POST' })),
+    cancel: async (id: string) =>
+      normalizeTask(await request<TaskRawResponse>(`/tasks/${id}/cancel`, { method: 'POST' })),
+    retry: async (id: string) =>
+      normalizeTask(await request<TaskRawResponse>(`/tasks/${id}/retry`, { method: 'POST' })),
+    pipeline: {
+      status: () => request<PipelineStatus>('/tasks/pipeline/status'),
+      pause: () => request<void>('/tasks/pipeline/pause', { method: 'POST' }),
+      resume: () => request<void>('/tasks/pipeline/resume', { method: 'POST' }),
+    },
+    bulk: {
+      run: (ids: string[]) =>
+        request<void>('/tasks/bulk/run', { method: 'POST', body: JSON.stringify({ task_ids: ids }) }),
+      cancel: (ids: string[]) =>
+        request<void>('/tasks/bulk/cancel', { method: 'POST', body: JSON.stringify({ task_ids: ids }) }),
+      delete: (ids: string[]) =>
+        request<void>('/tasks/bulk/delete', { method: 'POST', body: JSON.stringify({ task_ids: ids }) }),
+    },
   },
   runs: {
     list: (taskId?: string) =>
@@ -55,7 +112,7 @@ export const api = {
     overlay: () => request<Record<string, import('../types').SmashGridPoint[]>>('/smash/overlay'),
     route: (description: string, role: string) =>
       request<{ model: string; coord: import('../types').SmashCoord; fit: number }>(
-        `/smash/route?description=${encodeURIComponent(description)}&role=${role}`
+        `/smash/route?description=${encodeURIComponent(description)}&role=${role}`,
       ),
   },
   tournament: {
@@ -79,15 +136,47 @@ export const api = {
   },
 };
 
+type SSECallbacks = {
+  onOpen?: () => void;
+  onError?: () => void;
+  onClose?: () => void;
+};
+
 // SSE helper
-export function subscribeSSE(path: string, onEvent: (event: import('../types').SSEEvent) => void): () => void {
-  const source = new EventSource(`${BASE}${path}`);
+export function subscribeSSE<TEvent extends SSEEvent = SSEEvent>(
+  path: string,
+  onEvent: (event: TEvent) => void,
+  callbacks?: SSECallbacks,
+): () => void {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const source = new EventSource(`${BASE}${normalizedPath}`);
   const types = ['phase', 'log', 'test', 'code', 'review', 'error', 'fight', 'task', 'done'] as const;
+  let closed = false;
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    source.close();
+    callbacks?.onClose?.();
+  };
+
+  source.onopen = () => callbacks?.onOpen?.();
   for (const type of types) {
     source.addEventListener(type, (e) => {
-      onEvent({ type, data: JSON.parse((e as MessageEvent).data) } as import('../types').SSEEvent);
+      onEvent({ type, data: JSON.parse((e as MessageEvent).data) } as TEvent);
     });
   }
-  source.onerror = () => source.close();
-  return () => source.close();
+  source.onerror = () => {
+    callbacks?.onError?.();
+    close();
+  };
+  return close;
+}
+
+export function subscribeTaskSSE(
+  taskId: string,
+  onEvent: (event: TaskSSEEvent) => void,
+  callbacks?: SSECallbacks,
+): () => void {
+  return subscribeSSE<TaskSSEEvent>(`/tasks/${taskId}/stream`, onEvent, callbacks);
 }

@@ -121,6 +121,21 @@ class TaskList(BaseModel):
     total: int
 
 
+class TaskBulkRequest(BaseModel):
+    task_ids: list[str] = Field(default_factory=list)
+
+
+class BulkTaskActionResponse(BaseModel):
+    ok: bool = True
+    count: int
+    task_ids: list[str]
+
+
+class PipelineStatusResponse(BaseModel):
+    paused: bool
+    queue_depth: int
+
+
 # ── Run schemas ─────────────────────────────────────────────────────────────
 
 class RunResponse(BaseModel):

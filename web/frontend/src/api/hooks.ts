@@ -1,6 +1,15 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './client';
 import type { TaskCreate, TournamentStartOpts } from '../types';
+
+function invalidateTaskQueries(qc: ReturnType<typeof useQueryClient>, id?: string) {
+  void qc.invalidateQueries({ queryKey: ['tasks'] });
+  void qc.invalidateQueries({ queryKey: ['dashboard'] });
+  void qc.invalidateQueries({ queryKey: ['pipeline-status'] });
+  if (id) {
+    void qc.invalidateQueries({ queryKey: ['task', id] });
+  }
+}
 
 export function useDashboard() {
   return useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard.get, refetchInterval: 5000 });
@@ -11,14 +20,19 @@ export function useTasks(status?: string) {
 }
 
 export function useTask(id: string) {
-  return useQuery({ queryKey: ['task', id], queryFn: () => api.tasks.get(id), refetchInterval: 3000 });
+  return useQuery({
+    queryKey: ['task', id],
+    queryFn: () => api.tasks.get(id),
+    enabled: Boolean(id),
+    refetchInterval: 3000,
+  });
 }
 
 export function useCreateTask() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (data: TaskCreate) => api.tasks.create(data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks'] }),
+    onSuccess: (task) => invalidateTaskQueries(qc, task.id),
   });
 }
 
@@ -26,10 +40,7 @@ export function useRunTask() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.tasks.run(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['tasks'] });
-      qc.invalidateQueries({ queryKey: ['dashboard'] });
-    },
+    onSuccess: (task) => invalidateTaskQueries(qc, task.id),
   });
 }
 
@@ -37,7 +48,55 @@ export function useCancelTask() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.tasks.cancel(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks'] }),
+    onSuccess: (task) => invalidateTaskQueries(qc, task.id),
+  });
+}
+
+export function usePipelineStatus() {
+  return useQuery({
+    queryKey: ['pipeline-status'],
+    queryFn: api.tasks.pipeline.status,
+    refetchInterval: 5000,
+  });
+}
+
+export function usePausePipeline() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.tasks.pipeline.pause,
+    onSuccess: () => invalidateTaskQueries(qc),
+  });
+}
+
+export function useResumePipeline() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.tasks.pipeline.resume,
+    onSuccess: () => invalidateTaskQueries(qc),
+  });
+}
+
+export function useBulkRunTasks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: string[]) => api.tasks.bulk.run(ids),
+    onSuccess: () => invalidateTaskQueries(qc),
+  });
+}
+
+export function useBulkCancelTasks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: string[]) => api.tasks.bulk.cancel(ids),
+    onSuccess: () => invalidateTaskQueries(qc),
+  });
+}
+
+export function useBulkDeleteTasks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: string[]) => api.tasks.bulk.delete(ids),
+    onSuccess: () => invalidateTaskQueries(qc),
   });
 }
 
@@ -61,7 +120,7 @@ export function useUpdateSettings() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (settings: Record<string, string>) => api.settings.update(settings),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['settings'] }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['settings'] }),
   });
 }
 
@@ -81,7 +140,7 @@ export function useStartTournament() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (opts: TournamentStartOpts) => api.tournament.start(opts),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tournament-results'] }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['tournament-results'] }),
   });
 }
 
