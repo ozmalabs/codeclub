@@ -378,14 +378,16 @@ Teach your AI agent how to use codeclub. One command. Works everywhere.
 
 ### MCP server (Copilot CLI, Claude Desktop, any MCP client)
 
-The MCP server exposes five tools over stdio:
+The MCP server exposes seven tools over stdio:
 
 | Tool | What it does |
 |------|-------------|
+| `set_available_models` | Seed with YOUR client's models so routing is executable |
 | `classify_task` | Classify any task → category, confidence, suggested profile |
 | `estimate_cost` | Full routing plan → tokens, cost, wallclock, reasoning |
 | `compress_context` | Compress code/text → token savings |
-| `route_model` | Difficulty + clarity → model recommendation |
+| `route_model` | Difficulty + clarity → per-phase model picks + context strategy |
+| `list_models` | Show available models with Copilot multipliers and costs |
 | `list_profiles` | Browse 31 task profiles with cost estimates |
 
 ```bash
@@ -400,7 +402,10 @@ The MCP server exposes five tools over stdio:
 
 No API keys needed. Classification and routing are pure heuristics — zero LLM calls.
 
-Install once. Agent knows compress, dev loop, and routing APIs from first message.
+Copilot users: seed your models first — routing then knows GPT-4.1 is free (0×)
+and only escalates to Sonnet (1×) or Opus (10×) when complexity demands it.
+Route includes context strategy: **maximise context for Copilot** (per-prompt billing),
+compress for API (per-token billing). See [Copilot billing](docs/copilot-billing.md).
 
 ## Install
 
@@ -417,6 +422,7 @@ pip install codeclub-infra    # routing only
 - [Dev loop](docs/dev-loop.md) — pipeline, fix loop, benchmarks, accounting
 - [Routing](docs/routing.md) — hardware declaration, setup presets, providers, request classification
 - [Club Smash](docs/club-smash.md) — efficiency maps, task profiles, context strategies, right-sizing
+- [Copilot billing](docs/copilot-billing.md) — premium request multipliers, context maximisation, cost strategy
 - [Dynamic context](docs/dynamic-context.md) — session indexing, per-request retrieval, adaptive fit
 - [Benchmarks](docs/benchmarks.md) — full results, reproduction steps, methodology
 - [Architecture](docs/architecture.md) — file map, references

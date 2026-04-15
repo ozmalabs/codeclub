@@ -600,6 +600,57 @@ codeclub-route_model --difficulty 45 --clarity 80
 Or use the MCP tools directly in Copilot CLI — they're available after
 `/mcp add codeclub`.
 
+## Copilot billing: the numbers change everything
+
+> Caveman discover: biggest rock sometimes free. Mind blown.
+
+The dogfood analysis above uses API billing ($/token). But Copilot users pay
+**per-prompt × model multiplier**, not per-token. This flips the optimisation.
+
+### Included models are free
+
+On paid Copilot plans, GPT-5 mini, GPT-4.1, and GPT-4o cost **0 premium
+requests**. You can send 200K tokens of context and it costs the same as 200
+tokens: nothing.
+
+### Cost of the 4 remaining web features
+
+| Strategy | How | Premium requests | Cost |
+|----------|-----|-----------------|------|
+| All Opus 4.6 | 4 tasks × ~4 prompts × 10× | **160** | **$6.40** |
+| All Sonnet 4.6 | 4 tasks × ~4 prompts × 1× | **16** | **$0.64** |
+| All GPT-5 | 4 tasks × ~4 prompts × 1× | **16** | **$0.64** |
+| All GPT-4.1 | 4 tasks × ~4 prompts × 0× | **0** | **$0.00** |
+| Smart routing | 2×Sonnet + 2×GPT-4.1 | **2** | **$0.08** |
+
+### Agent mode makes it even cheaper
+
+In agent mode, 1 session = 1 premium request × multiplier. All the autonomous
+tool calls within that session are free. So:
+
+| Model | 4 agent sessions | Cost |
+|-------|-----------------|------|
+| Opus 4.6 (10×) | 40 premium reqs | $1.60 |
+| Sonnet 4.6 (1×) | 4 premium reqs | $0.16 |
+| GPT-4.1 (0×) | 0 premium reqs | $0.00 |
+| codeclub smart | 2 premium reqs | $0.08 |
+
+### The context strategy flip
+
+| | API billing | Copilot billing |
+|---|---|---|
+| Cost unit | tokens × $/token | prompts × multiplier |
+| Context size | expensive | **free** |
+| Compression | saves money | saves speed only |
+| Optimal strategy | minimal context, many calls | **maximum context, few calls** |
+| Follow-up question | cheap (just more tokens) | **expensive** (another premium req) |
+
+For Copilot users, codeclub recommends: **front-load ALL context into the initial
+prompt.** Every follow-up question avoided saves 1-10× premium requests. Speculative
+context (files you *might* need) is essentially free to include.
+
+→ [Full Copilot billing analysis](copilot-billing.md)
+
 ## Tournament validation
 
 The tournament (`tournament.py`) validates these heuristics with real code

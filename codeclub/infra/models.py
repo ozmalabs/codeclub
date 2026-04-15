@@ -441,7 +441,7 @@ REGISTRY: list[ModelSpec] = [
         swe_bench=0.78, human_eval=0.98,
         phases=frozenset(PHASES),
         max_complexity="expert",
-        tags=frozenset({"github", "cloud", "free", "copilot", "long-context"}),
+        tags=frozenset({"github", "cloud", "premium", "copilot", "long-context"}),
     ),
     ModelSpec(
         id="gpt-5", name="GPT-5 (GitHub Models)",
@@ -450,6 +450,15 @@ REGISTRY: list[ModelSpec] = [
         swe_bench=0.74, human_eval=0.97,
         phases=frozenset(PHASES),
         max_complexity="expert",
+        tags=frozenset({"github", "cloud", "premium", "copilot"}),
+    ),
+    ModelSpec(
+        id="gpt-5-mini", name="GPT-5 Mini (GitHub Models)",
+        provider="github", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=400_000,
+        swe_bench=0.55, human_eval=0.92,
+        phases=frozenset(PHASES),
+        max_complexity="complex",
         tags=frozenset({"github", "cloud", "free", "copilot"}),
     ),
     ModelSpec(
@@ -515,7 +524,7 @@ REGISTRY: list[ModelSpec] = [
         swe_bench=0.78, human_eval=0.98,
         phases=frozenset(PHASES),
         max_complexity="expert",
-        tags=frozenset({"copilot-sdk", "cloud", "free", "copilot", "long-context"}),
+        tags=frozenset({"copilot-sdk", "cloud", "premium", "copilot", "long-context"}),
     ),
     ModelSpec(
         id="copilot:gpt-5", name="GPT-5 (Copilot SDK)",
@@ -524,6 +533,15 @@ REGISTRY: list[ModelSpec] = [
         swe_bench=0.74, human_eval=0.97,
         phases=frozenset(PHASES),
         max_complexity="expert",
+        tags=frozenset({"copilot-sdk", "cloud", "premium", "copilot"}),
+    ),
+    ModelSpec(
+        id="copilot:gpt-5-mini", name="GPT-5 Mini (Copilot SDK)",
+        provider="copilot-sdk", family="gpt",
+        cost_in=0.0, cost_out=0.0, context=400_000,
+        swe_bench=0.55, human_eval=0.92,
+        phases=frozenset(PHASES),
+        max_complexity="complex",
         tags=frozenset({"copilot-sdk", "cloud", "free", "copilot"}),
     ),
     ModelSpec(

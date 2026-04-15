@@ -144,15 +144,19 @@ def _match_registry(client_id: str, registry: list) -> "ModelSpec | None":
     for m in registry:
         if _normalise_id(m.id) == norm:
             return m
-    # Substring match (e.g. client sends "claude-opus-4.6", registry has
-    # "claude-opus-4-6")
+    # Exact normalised match against name
     for m in registry:
-        if norm in _normalise_id(m.id) or _normalise_id(m.id) in norm:
+        if _normalise_id(m.name) == norm:
             return m
-    # Name match
+    # Suffix match — client sends "gpt-4.1", registry has "openai/gpt-4.1"
+    # Only match if the registry ID ends with the client ID (after provider prefix)
     for m in registry:
-        if norm in _normalise_id(m.name) or _normalise_id(m.name) in norm:
-            return m
+        rid = _normalise_id(m.id)
+        # Strip provider prefix (e.g. "openai/" → compare suffix)
+        if "/" in rid:
+            suffix = rid.split("/", 1)[1]
+            if suffix == norm:
+                return m
     return None
 
 
