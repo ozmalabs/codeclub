@@ -70,17 +70,29 @@ from codeclub.accounting.power import read_energy
 from codeclub.accounting.baseline import compute_savings, SavingsReport
 
 
+class RateLimitedError(RuntimeError):
+    """Raised when a model is persistently rate-limited (e.g. free-tier 429)."""
+    def __init__(self, model_id: str, message: str = ""):
+        self.model_id = model_id
+        super().__init__(message or f"{model_id} rate-limited")
+
+
 # ---------------------------------------------------------------------------
 # call_fn factories (re-exported here for convenience)
 # ---------------------------------------------------------------------------
 
 def _read_env_value(name: str) -> str:
-    env_file = Path(__file__).parent / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            if line.startswith(name) and "=" in line:
-                return line.split("=", 1)[1].strip()
-    return os.environ.get(name, "")
+    val = os.environ.get(name, "")
+    if val:
+        return val
+    # Search .env in project root (cwd), package root, then module dir
+    for base in (Path.cwd(), Path(__file__).resolve().parent.parent.parent, Path(__file__).parent):
+        env_file = base / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith(name) and "=" in line:
+                    return line.split("=", 1)[1].strip()
+    return ""
 
 
 def make_openrouter_fn(
@@ -129,6 +141,8 @@ def make_openrouter_fn(
                 if e.code == 429 and attempt < 2:
                     time.sleep(10 * (attempt + 1))
                     continue
+                if e.code == 429:
+                    raise RateLimitedError(model_id, f"429 after 3 attempts: {body[:200]}") from e
                 raise RuntimeError(f"HTTP {e.code}: {body[:300]}") from e
         if "error" in data:
             raise RuntimeError(str(data["error"])[:200])
@@ -664,15 +678,37 @@ def run(
         complexity = estimate_complexity(task)
         _suite = router.select_suite(complexity)
 
+        _excluded_ids: set[str] = set()
+
         def _fn_from_suite(phase: str, fallback_fn=None, max_tok: int = 2048) -> Callable[[str], str] | None:
             if fallback_fn is not None:
                 return fallback_fn
             m = _suite.get(phase)
             if m is None:
                 return None
-            return make_call_fn(m, max_tokens=max_tok,
-                                llama_server_url=llama_server_url,
-                                hardware=hardware)
+            inner = make_call_fn(m, max_tokens=max_tok,
+                                 llama_server_url=llama_server_url,
+                                 hardware=hardware)
+
+            def _with_fallback(prompt: str, _phase=phase, _max_tok=max_tok) -> str:
+                try:
+                    return inner(prompt)
+                except RateLimitedError as e:
+                    _excluded_ids.add(e.model_id)
+                    alt = router.select(_phase, complexity, exclude_ids=_excluded_ids)
+                    if alt is None:
+                        raise RuntimeError(
+                            f"All models for phase '{_phase}' are rate-limited or unavailable"
+                        ) from e
+                    alt_fn = make_call_fn(alt, max_tokens=_max_tok,
+                                         llama_server_url=llama_server_url,
+                                         hardware=hardware)
+                    if verbose:
+                        print(f"  ⚡ {e.model_id} rate-limited → falling back to {alt.id}")
+                    return alt_fn(prompt)
+
+            _with_fallback.__name__ = inner.__name__
+            return _with_fallback
 
         _spec_fn_r   = _fn_from_suite("spec",    spec_fn)
         _map_fn_r    = _fn_from_suite("map",     map_fn)

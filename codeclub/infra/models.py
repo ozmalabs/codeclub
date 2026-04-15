@@ -917,6 +917,7 @@ class ModelRouter:
         tracker: PerformanceTracker | None = None,
         escalate_after_failures: int = 2,
         hardware: "HardwareSetup | None" = None,
+        allow_free_remote: bool = False,
     ) -> None:
         """
         Parameters
@@ -931,6 +932,9 @@ class ModelRouter:
         hardware: HardwareSetup describing available devices and endpoints.
             If provided, local models are filtered by VRAM/RAM fit.
             If None, all local models are considered (no hardware check).
+        allow_free_remote: Include free-tier remote models (default: False).
+            Free remote models are generally rate-limited and unreliable.
+            Set True to opt in.
         """
         self.available_providers = available_providers
         self.budget = budget
@@ -938,6 +942,7 @@ class ModelRouter:
         self.tracker = tracker or PerformanceTracker()
         self.escalate_after = escalate_after_failures
         self.hardware = hardware
+        self.allow_free_remote = allow_free_remote
 
     def _hardware_fits(self, model: ModelSpec) -> bool:
         """Return True if model fits available hardware (or no hardware declared)."""
@@ -977,6 +982,10 @@ class ModelRouter:
 
             # Explicit exclusion
             if model.id in exclude:
+                continue
+
+            # Skip free remote models unless explicitly allowed
+            if model.free and not model.local and not self.allow_free_remote:
                 continue
 
             # Budget
@@ -1116,6 +1125,7 @@ def router_for_setup(setup: str, hardware: "HardwareSetup | None" = None, **kwar
         "openrouter_free": dict(
             available_providers={"openrouter"},
             budget="free", prefer_local=False,
+            allow_free_remote=True,
         ),
         "openrouter_cheap": dict(
             available_providers={"openrouter"},

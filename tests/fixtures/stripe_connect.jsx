@@ -14,8 +14,8 @@ import {
   listPaymentProviders,
 } from '../../services/domain/paymentProvidersApi';
 
-const primaryButtonClass = 'rp-btn rp-btn-primary rounded-full px-6 py-3';
-const surfaceButtonClass = 'rp-btn rp-btn-surface rounded-full px-6 py-3';
+const primaryButtonClass = 'app-btn app-btn-primary rounded-full px-6 py-3';
+const surfaceButtonClass = 'app-btn app-btn-surface rounded-full px-6 py-3';
 
 const StatusBadge = ({ label, ok }) => (
   <span
@@ -139,7 +139,7 @@ export const StripeConnectPage = () => {
           Stripe
         </h1>
         <p className="text-[#959DB0] text-sm mb-8">
-          Connect your Stripe account so ReviewPay can fund cashback and keep your business payment
+          Connect your Stripe account so Acme can fund cashback and keep your business payment
           setup active.
         </p>
 
@@ -408,7 +408,7 @@ export const UserStripeConnectPage = () => {
         Stripe Payouts
       </h1>
       <p className="text-[#959DB0] text-sm mb-8">
-        Connect your Stripe account so ReviewPay can pay cashback directly to your bank account.
+        Connect your Stripe account so Acme can pay cashback directly to your bank account.
       </p>
 
       {(providerError || error) && (
@@ -548,7 +548,7 @@ export const UserStripeConnectPage = () => {
                 </p>
               </div>
               <p>
-                Some details from your ReviewPay profile have been pre-filled, but Stripe may still ask
+                Some details from your Acme profile have been pre-filled, but Stripe may still ask
                 you to confirm or re-enter them.
               </p>
             </div>

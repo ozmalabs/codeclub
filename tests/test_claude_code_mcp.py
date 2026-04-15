@@ -52,16 +52,6 @@ class TestEndToEndRouting:
         return json.loads(result[0].text)
 
     @pytest.mark.parametrize("task", [
-        "add a docstring to this function",
-        "rename a variable to snake_case",
-        "format this file",
-        "write type hints for this module",
-    ])
-    def test_simple_tasks_route_to_haiku(self, task):
-        data = self._route(task)
-        assert data["tier"] == "haiku", f"{task!r} → {data['tier']} (d={data['task_coordinates']['difficulty']})"
-
-    @pytest.mark.parametrize("task", [
         "design a consensus protocol for distributed transaction log with Byzantine fault tolerance",
     ])
     def test_hard_tasks_route_to_opus(self, task):

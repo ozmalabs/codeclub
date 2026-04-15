@@ -92,7 +92,7 @@ def run_stub(files: dict[str, str]) -> StrategyResult:
     This is the most powerful single strategy for read-only code context.
     """
     original = "\n".join(files.values())
-    stubbed = {path: stub_functions(code)[0] for path, code in files.items()}
+    stubbed = {path: stub_functions(code, filename=path)[0] for path, code in files.items()}
     combined = "\n".join(stubbed.values())
     return StrategyResult(
         name="stub",
@@ -186,7 +186,7 @@ def run_full(files: dict[str, str], *, domain: str = "generic") -> StrategyResul
         # 2. Remove module/class docstrings
         c = strip_python_docstrings(c)
         # 3. Structural stub (LongCodeZip coarse pass)
-        c, _ = stub_functions(c)
+        c, _ = stub_functions(c, filename=path)
         # 4. Compact passes (section comments, sig collapse)
         c = compact(c, strip_sections=True, collapse_sigs=True)
         # 5. Symbol substitution (Stingy Context aliases)

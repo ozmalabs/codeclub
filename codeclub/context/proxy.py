@@ -815,12 +815,12 @@ def create_app(
 
     async def _forward_raw(body: dict, stream: bool):
         """Forward request without modification (FULL fit level)."""
+        if stream:
+            return StreamingResponse(
+                _raw_stream(body),
+                media_type="text/event-stream",
+            )
         async with httpx.AsyncClient(timeout=120) as client:
-            if stream:
-                return StreamingResponse(
-                    _raw_stream(body, client),
-                    media_type="text/event-stream",
-                )
             resp = await client.post(
                 f"{upstream_url}/chat/completions",
                 json=body,
@@ -831,14 +831,13 @@ def create_app(
                 headers=dict(resp.headers),
             )
 
-    async def _raw_stream(
-        body: dict, client: httpx.AsyncClient
-    ) -> AsyncIterator[bytes]:
-        async with client.stream(
-            "POST", f"{upstream_url}/chat/completions", json=body
-        ) as resp:
-            async for chunk in resp.aiter_bytes():
-                yield chunk
+    async def _raw_stream(body: dict) -> AsyncIterator[bytes]:
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream(
+                "POST", f"{upstream_url}/chat/completions", json=body
+            ) as resp:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
 
     async def _forward_and_get(body: dict) -> dict:
         async with httpx.AsyncClient(timeout=120) as client:

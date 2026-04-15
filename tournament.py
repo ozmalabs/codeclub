@@ -226,10 +226,320 @@ class TypeScriptRunner:
                 pass
 
 
+class GoRunner:
+    """Compile and run Go code via go build subprocess."""
+
+    lang = "go"
+
+    def check_syntax(self, code: str) -> tuple[bool, str]:
+        import subprocess, tempfile
+        td = tempfile.mkdtemp(prefix="gotest_")
+        src = os.path.join(td, "main.go")
+        try:
+            with open(src, "w") as f:
+                f.write(code)
+            r = subprocess.run(
+                ["go", "vet", src],
+                capture_output=True, text=True, timeout=30,
+                env={**os.environ, "GOPATH": td},
+            )
+            if r.returncode == 0:
+                return True, ""
+            return False, r.stderr[:500]
+        except Exception as e:
+            return False, str(e)
+        finally:
+            import shutil
+            shutil.rmtree(td, ignore_errors=True)
+
+    def _fix_package(self, code: str) -> str:
+        """Ensure code uses package main and strip any existing main()."""
+        import re
+        code = re.sub(r'^package\s+\w+', 'package main', code, count=1, flags=re.MULTILINE)
+        if not re.search(r'^package\s+main', code, re.MULTILINE):
+            code = 'package main\n\n' + code
+        # Strip model-generated main() — test provides its own.
+        # Find func main() and remove it by tracking brace depth.
+        m = re.search(r'\nfunc main\(\)\s*\{', code)
+        if m:
+            start = m.start()
+            depth = 0
+            i = m.end() - 1  # points at opening {
+            while i < len(code):
+                if code[i] == '{':
+                    depth += 1
+                elif code[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        code = code[:start] + code[i+1:]
+                        break
+                i += 1
+        return code
+
+    def _ensure_imports(self, impl_code: str, test_code: str) -> str:
+        """Merge impl + test, ensuring needed imports are present."""
+        import re
+        # Detect imports needed by test code
+        needed = set()
+        if "time." in test_code:
+            needed.add('"time"')
+        if "fmt." in test_code:
+            needed.add('"fmt"')
+        if "atomic." in test_code:
+            needed.add('"sync/atomic"')
+        if "sync." in test_code and "atomic." not in test_code:
+            needed.add('"sync"')
+
+        full = impl_code + "\n" + test_code
+
+        # Check which imports are already present
+        for imp in list(needed):
+            # Strip quotes for the check
+            bare = imp.strip('"')
+            if bare in impl_code:
+                needed.discard(imp)
+
+        if not needed:
+            return full
+
+        # Inject missing imports into existing import block or after package line
+        if 'import (' in full:
+            # Add to existing grouped import
+            full = full.replace('import (', 'import (\n\t' + '\n\t'.join(needed), 1)
+        elif re.search(r'^import\s+"', full, re.MULTILINE):
+            # Single import — convert to grouped
+            m = re.search(r'^(import\s+"[^"]*")', full, re.MULTILINE)
+            if m:
+                old_imp = m.group(1)
+                new_imp = 'import (\n\t' + old_imp.replace('import ', '') + '\n\t' + '\n\t'.join(needed) + '\n)'
+                full = full.replace(old_imp, new_imp, 1)
+        else:
+            # No imports at all — add after package line
+            full = re.sub(r'(package main\n)', r'\1\nimport (\n\t' + '\n\t'.join(needed) + '\n)\n', full, 1)
+
+        return full
+
+    def run_test(self, impl_code: str, test_code: str) -> tuple[bool, str]:
+        import subprocess, tempfile, shutil
+        td = tempfile.mkdtemp(prefix="gotest_")
+        src = os.path.join(td, "main.go")
+        binary = os.path.join(td, "main")
+        try:
+            impl_code = self._fix_package(impl_code)
+            full = self._ensure_imports(impl_code, test_code)
+            with open(src, "w") as f:
+                f.write(full)
+            # Fix imports (add missing, remove unused) via goimports
+            goimports = os.path.expanduser("~/go/bin/goimports")
+            if os.path.isfile(goimports):
+                subprocess.run(
+                    [goimports, "-w", src],
+                    capture_output=True, timeout=10,
+                )
+            comp = subprocess.run(
+                ["go", "build", "-o", binary, src],
+                capture_output=True, text=True, timeout=30,
+            )
+            if comp.returncode != 0:
+                return False, comp.stderr[:500]
+            run = subprocess.run(
+                [binary], capture_output=True, text=True, timeout=10,
+            )
+            if run.returncode != 0:
+                err = run.stderr[:500] or run.stdout[:500] or f"exit code {run.returncode}"
+                return False, err
+            return True, ""
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+
+class JavaRunner:
+    """Compile and run Java code via javac/java subprocess."""
+
+    lang = "java"
+
+    def _extract_class_name(self, code: str) -> str:
+        """Extract the public class name, or first class name."""
+        import re
+        m = re.search(r'public\s+class\s+(\w+)', code)
+        if m:
+            return m.group(1)
+        m = re.search(r'class\s+(\w+)', code)
+        return m.group(1) if m else "Main"
+
+    def check_syntax(self, code: str) -> tuple[bool, str]:
+        import subprocess, tempfile, shutil
+        td = tempfile.mkdtemp(prefix="javatest_")
+        cls = self._extract_class_name(code)
+        src = os.path.join(td, f"{cls}.java")
+        try:
+            with open(src, "w") as f:
+                f.write(code)
+            r = subprocess.run(
+                ["javac", src],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode == 0:
+                return True, ""
+            return False, r.stderr[:500]
+        except Exception as e:
+            return False, str(e)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+    def run_test(self, impl_code: str, test_code: str) -> tuple[bool, str]:
+        import subprocess, tempfile, shutil
+        td = tempfile.mkdtemp(prefix="javatest_")
+        try:
+            # Write impl to its own file
+            impl_cls = self._extract_class_name(impl_code)
+            impl_src = os.path.join(td, f"{impl_cls}.java")
+            with open(impl_src, "w") as f:
+                f.write(impl_code)
+
+            # Test code has a Main class with main()
+            test_src = os.path.join(td, "Main.java")
+            with open(test_src, "w") as f:
+                f.write(test_code)
+
+            # Compile both
+            comp = subprocess.run(
+                ["javac", impl_src, test_src],
+                capture_output=True, text=True, timeout=30,
+            )
+            if comp.returncode != 0:
+                return False, comp.stderr[:500]
+
+            # Run the test (-ea enables assert statements)
+            run = subprocess.run(
+                ["java", "-ea", "-cp", td, "Main"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if run.returncode != 0:
+                err = run.stderr[:500] or run.stdout[:500] or f"exit code {run.returncode}"
+                return False, err
+            return True, ""
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+
+class CSharpRunner:
+    """Compile and run C# code via dotnet subprocess."""
+
+    lang = "csharp"
+
+    def _init_project(self, td: str) -> None:
+        """Create a minimal .NET console project in td."""
+        import subprocess
+        subprocess.run(
+            ["dotnet", "new", "console", "--force", "-o", td],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def _build_and_run(self, td: str, code: str, run: bool = True) -> tuple[bool, str]:
+        """Write code, build, optionally run. Returns (ok, error)."""
+        import subprocess
+        prog = os.path.join(td, "Program.cs")
+        with open(prog, "w") as f:
+            f.write(code)
+
+        comp = subprocess.run(
+            ["dotnet", "build", "--nologo", td],
+            capture_output=True, text=True, timeout=30,
+        )
+        if comp.returncode != 0:
+            # Extract error lines (skip warnings/info)
+            lines = (comp.stderr + comp.stdout).splitlines()
+            errors = [l for l in lines if ": error " in l]
+            return False, "\n".join(errors[:5]) or (comp.stderr + comp.stdout)[:500]
+
+        if not run:
+            return True, ""
+
+        result = subprocess.run(
+            ["dotnet", "run", "--no-build", "--project", td],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            err = result.stderr[:500] or result.stdout[:500] or f"exit code {result.returncode}"
+            return False, err
+        return True, ""
+
+    def check_syntax(self, code: str) -> tuple[bool, str]:
+        import subprocess, tempfile, shutil
+        td = tempfile.mkdtemp(prefix="cstest_")
+        try:
+            # Use classlib (no Main required) for syntax-only check
+            subprocess.run(
+                ["dotnet", "new", "classlib", "--force", "-o", td],
+                capture_output=True, text=True, timeout=30,
+            )
+            # Remove the default Class1.cs
+            default = os.path.join(td, "Class1.cs")
+            if os.path.exists(default):
+                os.remove(default)
+            with open(os.path.join(td, "Code.cs"), "w") as f:
+                f.write(code)
+            comp = subprocess.run(
+                ["dotnet", "build", "--nologo", td],
+                capture_output=True, text=True, timeout=30,
+            )
+            if comp.returncode == 0:
+                return True, ""
+            lines = (comp.stderr + comp.stdout).splitlines()
+            errors = [l for l in lines if ": error " in l]
+            return False, "\n".join(errors[:5]) or (comp.stderr + comp.stdout)[:500]
+        except Exception as e:
+            return False, str(e)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+    @staticmethod
+    def _merge_code(impl_code: str, test_code: str) -> str:
+        """Combine impl + test, hoisting all 'using' directives to the top."""
+        import re
+        all_code = impl_code.rstrip() + "\n\n" + test_code
+        lines = all_code.splitlines()
+        usings: list[str] = []
+        rest: list[str] = []
+        for line in lines:
+            if re.match(r'^\s*using\s+[\w.]+\s*;', line):
+                if line.strip() not in {u.strip() for u in usings}:
+                    usings.append(line)
+            else:
+                rest.append(line)
+        return "\n".join(usings + [""] + rest) if usings else "\n".join(rest)
+
+    def run_test(self, impl_code: str, test_code: str) -> tuple[bool, str]:
+        import tempfile, shutil
+        td = tempfile.mkdtemp(prefix="cstest_")
+        try:
+            self._init_project(td)
+            combined = self._merge_code(impl_code, test_code)
+            return self._build_and_run(td, combined, run=True)
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+
 RUNNERS: dict[str, LanguageRunner] = {
     "python": PythonRunner(),
     "rust": RustRunner(),
     "typescript": TypeScriptRunner(),
+    "go": GoRunner(),
+    "java": JavaRunner(),
+    "csharp": CSharpRunner(),
 }
 
 
@@ -421,37 +731,291 @@ def estimate_lang_proficiency(
     effective = active_params_b if (is_moe and active_params_b) else params_b
 
     if effective >= 70:
-        return {"python": 1.0, "rust": 0.85, "typescript": 0.90, "jsx": 0.85, "default": 0.80}
+        return {"python": 1.0, "rust": 0.85, "typescript": 0.90, "go": 0.90, "java": 0.95, "jsx": 0.85, "default": 0.80}
     elif effective >= 30:
-        return {"python": 1.0, "rust": 0.75, "typescript": 0.85, "jsx": 0.80, "default": 0.70}
+        return {"python": 1.0, "rust": 0.75, "typescript": 0.85, "go": 0.85, "java": 0.90, "jsx": 0.80, "default": 0.70}
     elif effective >= 10:
-        return {"python": 1.0, "rust": 0.55, "typescript": 0.75, "jsx": 0.70, "default": 0.60}
+        return {"python": 1.0, "rust": 0.55, "typescript": 0.75, "go": 0.75, "java": 0.80, "jsx": 0.70, "default": 0.60}
     elif effective >= 5:
-        return {"python": 0.95, "rust": 0.40, "typescript": 0.65, "jsx": 0.60, "default": 0.50}
+        return {"python": 0.95, "rust": 0.40, "typescript": 0.65, "go": 0.65, "java": 0.70, "jsx": 0.60, "default": 0.50}
     else:
-        return {"python": 0.85, "rust": 0.20, "typescript": 0.50, "jsx": 0.45, "default": 0.40}
+        return {"python": 0.85, "rust": 0.20, "typescript": 0.50, "go": 0.45, "java": 0.55, "jsx": 0.45, "default": 0.40}
 
 
-# Data-driven language proficiency from 232 benchmark fights.
-# Format: {model_name: {lang: proficiency}} where proficiency = avg_quality / best_python_quality
+# Data-driven language proficiency from 400+ benchmark fights (2026-04).
+# Format: {model_name: {lang: proficiency}} where proficiency = lang_boundary / python_boundary
 # Only includes models with enough data; others use estimate_lang_proficiency().
 MEASURED_LANG_PROFICIENCY: dict[str, dict[str, float]] = {
-    "gpt-5.4-mini":     {"python": 1.0, "rust": 0.89, "default": 0.85},
-    "gpt-5.4":          {"python": 1.0, "rust": 0.84, "default": 0.80},
-    "gpt-5.4-nano":     {"python": 1.0, "rust": 0.73, "default": 0.65},
-    "claude-sonnet-4.6": {"python": 1.0, "rust": 0.82, "default": 0.80},
-    "claude-haiku-4.5":  {"python": 1.0, "rust": 0.84, "default": 0.75},
-    "gemini-2.5-flash":  {"python": 1.0, "rust": 0.70, "default": 0.70},
-    "gemini-2.5-pro":    {"python": 1.0, "rust": 0.67, "default": 0.70},
-    "codestral-2508":    {"python": 1.0, "rust": 0.61, "default": 0.65},
-    "deepseek-v3.1":     {"python": 1.0, "rust": 0.61, "default": 0.70},
-    "deepseek-r1":       {"python": 0.63, "rust": 1.0, "default": 0.70},  # better at Rust!
-    "devstral-small":    {"python": 1.0, "rust": 0.0, "default": 0.40},
-    "phi-4":             {"python": 1.0, "rust": 0.0, "default": 0.40},
+    "gpt-5.4-mini":     {"python": 1.0, "rust": 0.89, "typescript": 0.91, "default": 0.85},
+    "gpt-5.4":          {"python": 1.0, "rust": 0.84, "typescript": 0.91, "default": 0.85},
+    "gpt-5.4-nano":     {"python": 1.0, "rust": 0.73, "typescript": 1.00, "default": 0.70},
+    "claude-sonnet-4.6": {"python": 1.0, "rust": 0.82, "typescript": 0.91, "default": 0.85},
+    "claude-haiku-4.5":  {"python": 1.0, "rust": 0.84, "typescript": 1.00, "default": 0.85},
+    "gemini-2.5-flash":  {"python": 1.0, "rust": 0.70, "typescript": 1.00, "default": 0.80},
+    "gemini-2.5-pro":    {"python": 1.0, "rust": 0.67, "typescript": 0.69, "default": 0.70},
+    "codestral-2508":    {"python": 1.0, "rust": 0.61, "typescript": 1.00, "default": 0.75},
+    "deepseek-v3.1":     {"python": 1.0, "rust": 0.61, "typescript": 1.00, "default": 0.75},
+    "deepseek-r1":       {"python": 0.63, "rust": 1.0, "typescript": 0.74, "default": 0.70},
+    "devstral-small":    {"python": 1.0, "rust": 0.0, "typescript": 0.74, "default": 0.50},
+    "phi-4":             {"python": 1.0, "rust": 0.0, "typescript": 0.55, "default": 0.40},
     "qwen2.5-coder:1.5b": {"python": 1.0, "rust": 0.18, "default": 0.30},
     "rnj-1:8b":          {"python": 1.0, "rust": 0.65, "default": 0.60},
-    "gemma4-26b-a4b":    {"python": 1.0, "rust": 0.50, "default": 0.55},
+    "gemma4-26b-a4b":    {"python": 1.0, "rust": 0.50, "typescript": 1.00, "default": 0.65},
+    "gemma4-26b-a4b-cloud": {"python": 1.0, "rust": 0.0, "typescript": 1.00, "default": 0.60},
+    "gemma4-31b-dense":  {"python": 1.0, "rust": 0.0, "typescript": 1.00, "default": 0.60},
+    "llama-3.3-70b":     {"python": 1.0, "rust": 0.0, "typescript": 1.00, "default": 0.60},
+    "llama-4-maverick":  {"python": 1.0, "rust": 0.0, "typescript": 1.00, "default": 0.65},
+    "qwen3-coder:30b-cloud": {"python": 1.0, "rust": 0.0, "typescript": 1.00, "default": 0.60},
+    "qwen3-coder:30b-instruct": {"python": 1.0, "rust": 0.0, "typescript": 1.00, "default": 0.60},
 }
+
+
+# ── Cross-language inference from 400+ fights ──────────────────────────────
+# Median boundary ratios: lang_boundary / python_boundary.
+# Java has the tightest spread (σ≈0.12) — best single-fight calibrator.
+# Rust has the widest (σ≈0.22) — most model-dependent.
+LANG_RATIO_TO_PYTHON: dict[str, float] = {
+    "python": 1.00,
+    "typescript": 1.00,   # median 1.00, range 0.55–1.00
+    "java": 1.02,         # median 1.02, range 0.91–1.25
+    "csharp": 1.02,       # measured ≈ Java (±10d across 3 models, n=12)
+    "go": 1.02,           # median 1.02, range 0.28–1.25 (n=5, needs more data)
+    "rust": 0.85,         # median 0.85, range 0.62–1.42
+    "jsx": 0.95,          # estimated, ≈TS
+}
+
+# Confidence weight: how much to trust a single fight in this language
+# for estimating the full map. Higher = tighter observed spread.
+LANG_CALIBRATION_CONFIDENCE: dict[str, float] = {
+    "java": 0.90,         # tightest spread — best calibrator
+    "csharp": 0.88,       # assumed ≈ Java
+    "typescript": 0.85,
+    "python": 0.85,
+    "go": 0.70,           # moderate spread, small sample
+    "rust": 0.50,         # widest spread — worst calibrator
+}
+
+
+def estimate_boundary_from_any_lang(
+    known_lang: str, known_boundary: int,
+    model_name: str | None = None,
+) -> dict[str, int]:
+    """
+    Given a boundary measured in one language, estimate all other language boundaries.
+
+    Uses median cross-language ratios. If model_name is provided and has measured
+    proficiency data, uses that instead (more accurate).
+
+    Returns {lang: estimated_boundary}.
+    """
+    # Derive py_boundary from known language
+    # Try model-specific ratio for the known language first
+    model_ratios = {}
+    if model_name and model_name in MEASURED_LANG_PROFICIENCY:
+        model_ratios = MEASURED_LANG_PROFICIENCY[model_name]
+
+    if known_lang in model_ratios and model_ratios[known_lang] > 0:
+        py_boundary = known_boundary / model_ratios[known_lang]
+    else:
+        known_ratio = LANG_RATIO_TO_PYTHON.get(known_lang, 0.85)
+        py_boundary = known_boundary / known_ratio
+
+    # For each target language, use model-specific ratio if it exists
+    # (but NOT the "default" key — that's a guess, not measured data).
+    # Fall back to median cross-language ratios.
+    result = {}
+    for lang in ("python", "typescript", "rust", "go", "java", "csharp"):
+        if lang in model_ratios:
+            # Model has a specific ratio for this language (measured or curated)
+            result[lang] = int(py_boundary * model_ratios[lang])
+        else:
+            # Use median ratio from cross-language data
+            ratio = LANG_RATIO_TO_PYTHON.get(lang, 0.85)
+            result[lang] = int(py_boundary * ratio)
+
+    return result
+
+
+def full_proficiency_map(
+    db_path: str = "benchmarks/results.db",
+) -> dict[str, dict[str, tuple[int, bool]]]:
+    """
+    Build a full 5-language proficiency map for every model in the DB.
+
+    Uses measured boundaries where available, fills gaps with cross-language
+    estimation. Returns {model: {lang: (boundary, is_measured)}}.
+    """
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("""
+        SELECT model, task_lang,
+               MAX(CASE WHEN quality=1.0 THEN coord_difficulty ELSE 0 END) as boundary
+        FROM results GROUP BY model, task_lang
+    """).fetchall()
+    conn.close()
+
+    # Build measured data: {model: {lang: boundary}}
+    measured: dict[str, dict[str, int]] = {}
+    for model, lang, boundary in rows:
+        measured.setdefault(model, {})[lang] = boundary
+
+    all_langs = ["python", "typescript", "java", "csharp", "go", "rust"]
+    result: dict[str, dict[str, tuple[int, bool]]] = {}
+
+    for model, langs in measured.items():
+        entry: dict[str, tuple[int, bool]] = {}
+
+        # Pick the best measured language for estimation (highest confidence)
+        best_measured_lang = None
+        best_conf = -1
+        for lang, boundary in langs.items():
+            if boundary > 0:
+                conf = LANG_CALIBRATION_CONFIDENCE.get(lang, 0.5)
+                if conf > best_conf:
+                    best_conf = conf
+                    best_measured_lang = lang
+
+        # Estimate from best measured language
+        estimates = {}
+        if best_measured_lang:
+            estimates = estimate_boundary_from_any_lang(
+                best_measured_lang, langs[best_measured_lang], model
+            )
+
+        for lang in all_langs:
+            if lang in langs and langs[lang] > 0:
+                entry[lang] = (langs[lang], True)
+            elif lang in langs and langs[lang] == 0:
+                # Measured as 0 (failed all tasks) — keep as measured
+                entry[lang] = (0, True)
+            elif lang in estimates and estimates[lang] > 0:
+                entry[lang] = (estimates[lang], False)
+            else:
+                entry[lang] = (0, False)
+
+        result[model] = entry
+
+    return result
+
+
+def best_calibration_task(py_boundary_estimate: int) -> tuple[str, str]:
+    """
+    Pick the single best task to calibrate a model with one fight.
+
+    Returns (task_id, reason). Prefers Java (tightest cross-lang spread)
+    at a difficulty near the estimated boundary.
+    """
+    # Java is the best single-fight calibrator (σ≈0.12)
+    # Pick a task near the estimated Java boundary
+    java_boundary = int(py_boundary_estimate * LANG_RATIO_TO_PYTHON["java"])
+
+    # Candidate Java tasks sorted by difficulty
+    java_tasks = [
+        ("java-stack", 25),
+        ("java-rate-limiter", 40),
+        ("java-lru-cache", 50),
+        ("java-event-emitter", 55),
+        ("java-expr-parser", 70),
+        ("java-json-parser", 80),
+        ("java-thread-pool", 90),
+    ]
+
+    # Pick the task closest to boundary — ideally one that'll be right at the edge
+    best = min(java_tasks, key=lambda t: abs(t[1] - java_boundary))
+    return best[0], f"Java d={best[1]} near estimated boundary {java_boundary}d"
+
+
+def pick_probe_tasks(
+    known_lang: str | None = None,
+    known_boundary: int | None = None,
+    model_name: str | None = None,
+    target_langs: list[str] | None = None,
+    max_per_lang: int = 4,
+) -> dict[str, list[tuple[str, int, int]]]:
+    """
+    Pick optimal probe tasks for each language using cross-language estimation.
+
+    Given a known boundary in ANY language, estimates boundaries for all other
+    languages and selects 3-4 tasks per language near the estimated boundary.
+
+    Args:
+        known_lang: Language where we have a measured boundary (e.g. "java")
+        known_boundary: Measured boundary difficulty in known_lang
+        model_name: Model name (for model-specific calibration data)
+        target_langs: Languages to probe (default: all 5)
+        max_per_lang: Max tasks per language (default: 4)
+
+    Returns:
+        {lang: [(task_id, coord_difficulty, estimated_boundary)]}
+    """
+    if target_langs is None:
+        target_langs = ["python", "typescript", "java", "go", "rust"]
+
+    # Estimate boundaries for all languages
+    if known_lang and known_boundary:
+        estimates = estimate_boundary_from_any_lang(
+            known_lang, known_boundary, model_name
+        )
+    else:
+        # No prior data — use midpoint (65d) as default
+        estimates = {lang: 65 for lang in target_langs}
+
+    # Collect all tasks grouped by language
+    tasks_by_lang: dict[str, list[tuple[str, int]]] = {}
+    for tid, task in TASKS.items():
+        lang = task.lang
+        if lang not in target_langs:
+            continue
+        # coord_difficulty = base_difficulty + 10 (oneshot coordination)
+        coord_d = task.base_difficulty + 10
+        tasks_by_lang.setdefault(lang, []).append((tid, coord_d))
+
+    result: dict[str, list[tuple[str, int, int]]] = {}
+    for lang in target_langs:
+        if lang not in tasks_by_lang:
+            continue
+        est_b = estimates.get(lang, 65)
+        candidates = sorted(tasks_by_lang[lang], key=lambda t: t[1])
+
+        # Strategy: pick tasks that bracket the estimated boundary
+        # 1. One easy task (well below boundary) — sanity check
+        # 2. One near boundary — the discriminating probe
+        # 3. One above boundary — test for upside
+        # 4. Optionally one hard task if boundary is high
+        selected: list[tuple[str, int, int]] = []
+
+        # Sort by distance from boundary
+        by_distance = sorted(candidates, key=lambda t: abs(t[1] - est_b))
+
+        # Always include the closest to boundary
+        if by_distance:
+            selected.append((*by_distance[0], est_b))
+
+        # Add easy sanity check (lowest difficulty below boundary)
+        below = [t for t in candidates if t[1] < est_b - 10]
+        if below:
+            easy = below[0]  # lowest difficulty
+            if easy[0] not in {s[0] for s in selected}:
+                selected.append((*easy, est_b))
+
+        # Add above-boundary probe
+        above = [t for t in candidates if t[1] > est_b + 5]
+        if above:
+            stretch = above[0]  # first above boundary
+            if stretch[0] not in {s[0] for s in selected}:
+                selected.append((*stretch, est_b))
+
+        # Fill remaining slots with next-closest tasks
+        for tid, d in by_distance:
+            if len(selected) >= max_per_lang:
+                break
+            if tid not in {s[0] for s in selected}:
+                selected.append((tid, d, est_b))
+
+        # Sort by difficulty for clean output
+        result[lang] = sorted(selected, key=lambda t: t[1])
+
+    return result
 
 
 def estimate_token_load(coord: SmashCoord) -> int:
@@ -2420,8 +2984,14 @@ def estimate_query_coords(
     Heuristic: estimate (difficulty, clarity) for an arbitrary query.
     This is the universal router's entry point — no benchmarks needed,
     just approximate where the query falls on the plane.
+
+    Uses word-boundary regex signals in three tiers (easy/medium/hard)
+    with bidirectional scoring, structural analysis, and chat detection.
     """
-    # Clarity heuristics
+    desc = description.lower()
+    words = len(description.split())
+
+    # ── Clarity ──────────────────────────────────────────────────────
     clarity = 50
     if has_signatures:
         clarity += 15
@@ -2429,71 +2999,139 @@ def estimate_query_coords(
         clarity += 15
     if has_examples:
         clarity += 10
-    words = len(description.split())
-    if words > 200:
-        clarity -= 10       # verbose ≠ clear
-    elif words > 50:
-        clarity += 5        # detailed spec
 
-    # Difficulty heuristics
-    # Start at 30 (baseline "simple coding task"), then adjust both ways.
-    difficulty = 30
-    desc = description.lower()
+    # Text structure signals
+    if words < 10:
+        clarity -= 15       # very short = ambiguous
+    elif words < 30:
+        clarity -= 5
+    elif 30 <= words <= 150:
+        clarity += 10       # detailed spec
+    elif words > 300:
+        clarity += 5        # long but may be verbose
 
-    # ── Downward signals (simple/trivial tasks) ──────────────────────
-    simple_signals = [
-        "docstring", "comment", "format", "lint", "rename", "typo",
-        "type hint", "import", "boilerplate", "scaffold", "placeholder",
-        "snake_case", "camelcase", "whitespace", "indentation",
-        "move file", "delete file", "copy", "print statement",
+    # Specificity markers
+    if any(w in desc for w in ["must", "should", "require", "given", "when", "then"]):
+        clarity += 10
+    if any(w in desc for w in ["example", "e.g.", "for instance", "such as"]):
+        clarity += 8
+    if any(c in description for c in ["```", "def ", "class ", "function"]):
+        clarity += 10       # code in prompt = very specific
+    if "?" in description and words < 15:
+        clarity -= 10       # short question = vague
+
+    # ── Chat / trivial detection ─────────────────────────────────────
+    # These pull difficulty DOWN hard — they're not code tasks.
+    _CHAT_PATTERNS = [
+        r"^(what|who|where|when|how|why|is|are|can|does|do|will|would|should) ",
+        r"\b(explain|describe|tell me|what is|what are|define|meaning of)\b",
+        r"\b(weather|recipe|joke|story|poem|song|translate|summarize)\b",
+        r"\b(opinion|recommend|suggest|advice|idea|thought)\b",
     ]
-    simple_count = sum(1 for s in simple_signals if s in desc)
-    if simple_count:
-        difficulty -= 10 + min(simple_count - 1, 2) * 5  # -10 to -20
+    chat_score = sum(1 for p in _CHAT_PATTERNS if re.search(p, desc))
 
-    # ── Upward signals (complexity) ──────────────────────────────────
-    complexity_signals = [
-        # algorithms / data structures
-        ("async", 5), ("concurrent", 8), ("recursive", 5),
-        ("parser", 7), ("state machine", 8),
-        ("tree", 4), ("graph", 6), ("cache", 4),
-        # distributed / protocol
-        ("protocol", 7), ("distributed", 10), ("consensus", 12),
-        ("byzantine", 15), ("raft", 10), ("paxos", 10),
-        # security / auth
-        ("security", 8), ("vulnerabilit", 10), ("cryptograph", 12),
-        ("oauth", 8), ("pkce", 8), ("authentication", 6),
-        ("injection", 8), ("xss", 8), ("csrf", 6),
-        # architecture / design
-        ("architect", 10), ("design.*system", 8), ("design.*api", 7),
-        ("design.*model", 7), ("schema design", 8),
-        ("data model", 7), ("multi-tenant", 8),
-        ("greenfield", 8), ("migrate", 6), ("rewrite", 6),
-        # concurrency correctness
-        ("race condition", 10), ("deadlock", 10), ("lock-free", 12),
-        ("memory safety", 10),
-        # debugging complexity
-        ("intermittent", 6), ("flaky", 5), ("heisenbug", 8),
-        ("memory leak", 7), ("performance", 5),
-        # scope markers
-        ("end-to-end", 5), ("full stack", 5), ("microservice", 6),
-        ("pipeline", 4), ("infrastructure", 5),
+    # ── Easy signals (pull toward 10-25) ─────────────────────────────
+    _EASY_SIGNALS = [
+        (r"\b(docstring|comment|format|lint|rename|typo)\b", -12),
+        (r"\b(type hint|import|boilerplate|scaffold|placeholder)\b", -10),
+        (r"\b(snake.case|camel.?case|whitespace|indentation)\b", -10),
+        (r"\b(move file|delete file|copy|print statement)\b", -10),
+        (r"\b(hello world|print|echo|log|console\.log)\b", -8),
+        (r"\b(sort|reverse|count|max|min|average|filter)\b", -5),
+        (r"\b(simple|basic|trivial|easy|quick|small)\b", -6),
+        (r"\b(fix.*(typo|spelling|indent|format|whitespace))\b", -12),
+        (r"\b(add|remove|update|delete)\b.*\b(field|column|property)\b", -5),
+        (r"\b(read|write|open|close)\b.*\b(file|csv|json)\b", -4),
     ]
-    for signal, weight in complexity_signals:
-        if re.search(signal, desc):
-            difficulty += weight
 
-    # Word count adjustments
-    if words < 15:
-        difficulty -= 5     # short prompt = probably simple
+    # ── Medium signals (pull toward 35-55) ───────────────────────────
+    _MEDIUM_SIGNALS = [
+        (r"\b(API|REST|endpoint|middleware|auth|JWT|OAuth)\b", 5),
+        (r"\b(async|await|promise|callback|event.loop|coroutine)\b", 6),
+        (r"\b(test|mock|fixture|assert|coverage)\b", 3),
+        (r"\b(deploy|docker|container|CI|CD|pipeline)\b", 5),
+        (r"\b(cache|queue|pub.sub|websocket|streaming)\b", 6),
+        (r"\b(class|inherit|interface|abstract|factory|pattern)\b", 4),
+        (r"\b(SQL|query|join|aggregate|subquery)\b", 5),
+        (r"\b(tree|graph|heap|trie|linked.list)\b", 5),
+        (r"\b(recursive|recursion|backtrack|memoiz)\b", 5),
+        (r"\b(regex|parser|tokeniz|lexer)\b", 5),
+        (r"\b(database|schema|model|ORM|migration)\b", 4),
+        (r"\b(websocket|SSE|streaming|real.time)\b", 5),
+    ]
+
+    # ── Hard signals (pull toward 65-90) ─────────────────────────────
+    _HARD_SIGNALS = [
+        (r"\b(distributed|consensus|concurrent|parallel|lock.free)\b", 12),
+        (r"\b(optimize|O\(n\)|O\(log|NP.hard|dynamic programming|DP)\b", 10),
+        (r"\b(compiler|parser|AST|bytecode|interpreter|JIT)\b", 10),
+        (r"\b(kernel|driver|syscall|interrupt|memory.manag)\b", 12),
+        (r"\b(crypto|encryption|signature|certificate|TLS|SSL)\b", 8),
+        (r"\b(GPU|CUDA|shader|render|ray.trac)\b", 10),
+        (r"\b(neural|transformer|attention|backprop|gradient)\b", 10),
+        (r"\b(transaction|ACID|WAL|MVCC|isolation.level)\b", 10),
+        (r"\b(across.*files|refactor.*codebase|cross.codebase)\b", 8),
+        (r"\b(byzantine|raft|paxos|crdt|vector.clock)\b", 15),
+        (r"\b(race condition|deadlock|lock.free|memory safety)\b", 10),
+        (r"\b(architect|design.*system|multi.tenant|greenfield)\b", 8),
+        (r"\b(zero.downtime|rolling.update|blue.green|canary)\b", 8),
+        (r"\b(service mesh|istio|linkerd|envoy)\b", 8),
+    ]
+
+    # ── Score accumulation ───────────────────────────────────────────
+    # Start at 40 (middle of the scale), then pull both directions.
+    difficulty = 40
+
+    # Chat detection — strong downward pull
+    if chat_score >= 2:
+        difficulty -= 30    # clearly a chat/QA request → d=10
+    elif chat_score == 1:
+        difficulty -= 15    # probably a question → d=25
+
+    # Count signals per tier
+    easy_count = sum(1 for p, _ in _EASY_SIGNALS if re.search(p, desc))
+    medium_count = sum(1 for p, _ in _MEDIUM_SIGNALS if re.search(p, desc))
+    hard_count = sum(1 for p, _ in _HARD_SIGNALS if re.search(p, desc))
+
+    # Use tier dominance to set the base, not just additive offsets.
+    # This gives much better spread across the 0-100 range.
+    if hard_count >= 2:
+        difficulty = 70 + min(hard_count - 2, 3) * 5   # 70-85
+    elif hard_count == 1 and medium_count >= 1:
+        difficulty = 55 + min(medium_count, 3) * 5      # 55-70
+    elif medium_count >= 3:
+        difficulty = 50 + min(medium_count - 3, 3) * 3  # 50-59
+    elif medium_count >= 1:
+        difficulty = 35 + min(medium_count, 3) * 5      # 35-50
+    elif easy_count >= 2:
+        difficulty = 10 + min(easy_count - 2, 3) * 3    # 10-19
+    elif easy_count == 1:
+        difficulty = 20                                  # 20
+
+    # Fine-tune with accumulated weights (smaller effect on top of base)
+    for pattern, weight in _EASY_SIGNALS:
+        if re.search(pattern, desc):
+            difficulty += weight // 2   # negative weights, halved
+    for pattern, weight in _HARD_SIGNALS:
+        if re.search(pattern, desc):
+            difficulty += weight // 3   # positive weights, thirded
+
+    # Word count adjustments (longer prompts tend to be more complex)
+    if words < 10:
+        difficulty -= 8
+    elif words < 20:
+        difficulty -= 3
+    elif words > 200:
+        difficulty += 10
     elif words > 100:
-        difficulty += 10    # long spec = complex ask
+        difficulty += 6
     elif words > 50:
-        difficulty += 5
+        difficulty += 3
 
-    # Apply role offset
+    # ── Role offset ──────────────────────────────────────────────────
     defaults = ROLE_DEFAULTS.get(role, {"diff_offset": 0, "clarity": 70})
     difficulty = max(0, min(100, difficulty + defaults["diff_offset"]))
+
     # Role clarity overrides heuristic if role is well-structured
     if defaults["clarity"] > clarity:
         clarity = defaults["clarity"]
@@ -3003,6 +3641,29 @@ def classify_request_adaptive(
     return heuristic_result
 
 
+# ── Trained classifier (optional, loaded on first use) ───────────────────────
+# When available, the ModernBERT classifier provides difficulty, clarity, and
+# category directly — bypassing the heuristic. Falls back to heuristic if the
+# model isn't installed.
+
+_trained_classifier = None
+_trained_classifier_loaded = False
+
+def _get_trained_classifier():
+    """Lazy-load the trained ModernBERT classifier. Returns None if unavailable."""
+    global _trained_classifier, _trained_classifier_loaded
+    if _trained_classifier_loaded:
+        return _trained_classifier
+    _trained_classifier_loaded = True
+    try:
+        from classifier.inference import Classifier
+        _trained_classifier = Classifier()
+    except Exception:
+        # Model not installed or missing weights — use heuristic
+        _trained_classifier = None
+    return _trained_classifier
+
+
 def classify_and_estimate(
     description: str,
     role: str = "oneshot",
@@ -3011,6 +3672,7 @@ def classify_and_estimate(
     has_signatures: bool = False,
     call_fn: callable | None = None,
     confidence_threshold: float = 0.35,
+    use_model: bool = True,
 ) -> tuple[RequestClassification, SmashCoord, TaskProfile]:
     """
     Full pipeline: classify request → estimate coordinates → select profile.
@@ -3020,7 +3682,44 @@ def classify_and_estimate(
     - classification (what kind of task)
     - coordinates (difficulty × clarity)
     - profile (cost/time characteristics)
+
+    When use_model=True (default) and the trained classifier is available,
+    uses the ModernBERT model for coordinates + category. Otherwise falls
+    back to the heuristic classifier.
     """
+    # Try trained model first
+    if use_model:
+        clf = _get_trained_classifier()
+        if clf is not None:
+            result = clf.classify(description)
+
+            # Map model category to RequestClassification
+            cat = result.category
+            # Derive subcategory from heuristic signals (model doesn't predict it)
+            heuristic_cls = classify_request(description)
+            subcat = heuristic_cls.subcategory if heuristic_cls.category == cat else "general"
+
+            profile_key = _SUBCATEGORY_TO_PROFILE.get(
+                (cat, subcat),
+                _SUBCATEGORY_TO_PROFILE.get((cat, "general"), "code-moderate"),
+            )
+
+            classification = RequestClassification(
+                category=cat,
+                subcategory=subcat,
+                confidence=result.confidence,
+                suggested_profile=profile_key,
+                signals=[f"model:{cat} d={result.difficulty} c={result.clarity}"],
+            )
+            coord = SmashCoord(
+                difficulty=result.difficulty,
+                clarity=result.clarity,
+            )
+
+            profile = TASK_PROFILES[profile_key]
+            return classification, coord, profile
+
+    # Heuristic fallback
     classification = classify_request_adaptive(
         description, call_fn=call_fn, confidence_threshold=confidence_threshold,
     )
@@ -5653,7 +6352,7 @@ TASKS["ts-counter"] = TournamentTask(
         """)),
     ],
     base_difficulty=8,
-    spec_clarity=85,
+    spec_clarity=60,  # "reset" is ambiguous — reset to 0 or to initial value?
 )
 
 TASKS["ts-stack"] = TournamentTask(
@@ -6667,6 +7366,1815 @@ TASKS["ts-promise-pool"] = TournamentTask(
     spec_clarity=85,
 )
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# GO TASKS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+TASKS["go-stack"] = TournamentTask(
+    id="go-stack",
+    name="Stack",
+    lang="go",
+    description=(
+        "A generic stack data structure using Go generics. "
+        "Stack[T any] with methods: Push(val T), Pop() (T, bool), "
+        "Peek() (T, bool), Len() int, IsEmpty() bool. "
+        "Pop and Peek return the value and true, or zero value and false if empty."
+    ),
+    expected_class="Stack",
+    methods=[
+        "Push(val T)",
+        "Pop() (T, bool)",
+        "Peek() (T, bool)",
+        "Len() int",
+        "IsEmpty() bool",
+    ],
+    tests=[
+        ("push_pop", textwrap.dedent("""\
+            func main() {
+                s := &Stack[int]{}
+                s.Push(10)
+                s.Push(20)
+                v, ok := s.Pop()
+                if !ok || v != 20 { panic("expected 20") }
+                v, ok = s.Pop()
+                if !ok || v != 10 { panic("expected 10") }
+            }
+        """)),
+        ("empty_pop", textwrap.dedent("""\
+            func main() {
+                s := &Stack[int]{}
+                _, ok := s.Pop()
+                if ok { panic("expected false") }
+            }
+        """)),
+        ("peek", textwrap.dedent("""\
+            func main() {
+                s := &Stack[string]{}
+                s.Push("hello")
+                v, ok := s.Peek()
+                if !ok || v != "hello" { panic("expected hello") }
+                if s.Len() != 1 { panic("peek should not remove") }
+            }
+        """)),
+        ("len_empty", textwrap.dedent("""\
+            func main() {
+                s := &Stack[int]{}
+                if !s.IsEmpty() { panic("should be empty") }
+                s.Push(1)
+                if s.IsEmpty() { panic("should not be empty") }
+                if s.Len() != 1 { panic("expected len 1") }
+            }
+        """)),
+        ("string_type", textwrap.dedent("""\
+            func main() {
+                s := &Stack[string]{}
+                s.Push("a")
+                s.Push("b")
+                v, _ := s.Pop()
+                if v != "b" { panic("expected b") }
+            }
+        """)),
+    ],
+    base_difficulty=15,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["go-rate-limiter"] = TournamentTask(
+    id="go-rate-limiter",
+    name="RateLimiter",
+    lang="go",
+    description=(
+        "A sliding-window rate limiter. NewRateLimiter(maxCalls int, period time.Duration) "
+        "returns a *RateLimiter. Methods: Allow() bool — returns true if under limit, "
+        "Remaining() int — calls left in current window, Reset() — clears history."
+    ),
+    expected_class="RateLimiter",
+    methods=[
+        "NewRateLimiter(maxCalls int, period time.Duration) *RateLimiter",
+        "Allow() bool",
+        "Remaining() int",
+        "Reset()",
+    ],
+    tests=[
+        ("basic_limiting", textwrap.dedent("""\
+            func main() {
+                rl := NewRateLimiter(2, time.Second)
+                if !rl.Allow() { panic("first should pass") }
+                if !rl.Allow() { panic("second should pass") }
+                if rl.Allow() { panic("third should fail") }
+            }
+        """)),
+        ("remaining", textwrap.dedent("""\
+            func main() {
+                rl := NewRateLimiter(3, time.Second)
+                if rl.Remaining() != 3 { panic("expected 3") }
+                rl.Allow()
+                if rl.Remaining() != 2 { panic("expected 2") }
+            }
+        """)),
+        ("reset", textwrap.dedent("""\
+            func main() {
+                rl := NewRateLimiter(1, time.Second)
+                rl.Allow()
+                if rl.Allow() { panic("should be limited") }
+                rl.Reset()
+                if !rl.Allow() { panic("should pass after reset") }
+            }
+        """)),
+        ("window_expiry", textwrap.dedent("""\
+            func main() {
+                rl := NewRateLimiter(1, 50*time.Millisecond)
+                rl.Allow()
+                if rl.Allow() { panic("should be limited") }
+                time.Sleep(60 * time.Millisecond)
+                if !rl.Allow() { panic("should pass after window") }
+            }
+        """)),
+        ("zero_max", textwrap.dedent("""\
+            func main() {
+                rl := NewRateLimiter(0, time.Second)
+                if rl.Allow() { panic("zero max should deny all") }
+            }
+        """)),
+    ],
+    base_difficulty=30,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["go-lru-cache"] = TournamentTask(
+    id="go-lru-cache",
+    name="LRUCache",
+    lang="go",
+    description=(
+        "An LRU cache with a capacity limit using Go generics. "
+        "NewLRUCache[K comparable, V any](capacity int) returns *LRUCache[K, V]. "
+        "Methods: Get(key K) (V, bool), Put(key K, value V), Len() int. "
+        "Get returns value and true if found (marks as recently used), "
+        "or zero value and false if not found. "
+        "Put adds or updates. If at capacity, evicts least recently used entry."
+    ),
+    expected_class="LRUCache",
+    methods=[
+        "NewLRUCache[K comparable, V any](capacity int) *LRUCache[K, V]",
+        "Get(key K) (V, bool)",
+        "Put(key K, value V)",
+        "Len() int",
+    ],
+    tests=[
+        ("basic_get_put", textwrap.dedent("""\
+            func main() {
+                c := NewLRUCache[string, int](2)
+                c.Put("a", 1)
+                v, ok := c.Get("a")
+                if !ok || v != 1 { panic("expected 1") }
+            }
+        """)),
+        ("eviction", textwrap.dedent("""\
+            func main() {
+                c := NewLRUCache[string, int](2)
+                c.Put("a", 1)
+                c.Put("b", 2)
+                c.Put("c", 3)  // evicts "a"
+                _, ok := c.Get("a")
+                if ok { panic("a should be evicted") }
+                v, ok := c.Get("b")
+                if !ok || v != 2 { panic("b should exist") }
+            }
+        """)),
+        ("access_refreshes", textwrap.dedent("""\
+            func main() {
+                c := NewLRUCache[string, int](2)
+                c.Put("a", 1)
+                c.Put("b", 2)
+                c.Get("a")       // refresh a
+                c.Put("c", 3)   // evicts b (not a)
+                _, ok := c.Get("b")
+                if ok { panic("b should be evicted") }
+                v, ok := c.Get("a")
+                if !ok || v != 1 { panic("a should exist") }
+            }
+        """)),
+        ("update_existing", textwrap.dedent("""\
+            func main() {
+                c := NewLRUCache[string, int](2)
+                c.Put("a", 1)
+                c.Put("a", 99)
+                v, _ := c.Get("a")
+                if v != 99 { panic("expected updated value") }
+                if c.Len() != 1 { panic("expected len 1") }
+            }
+        """)),
+        ("len", textwrap.dedent("""\
+            func main() {
+                c := NewLRUCache[int, int](10)
+                if c.Len() != 0 { panic("expected 0") }
+                c.Put(1, 1)
+                c.Put(2, 2)
+                if c.Len() != 2 { panic("expected 2") }
+            }
+        """)),
+        ("miss", textwrap.dedent("""\
+            func main() {
+                c := NewLRUCache[string, string](5)
+                _, ok := c.Get("nope")
+                if ok { panic("should miss") }
+            }
+        """)),
+    ],
+    base_difficulty=40,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["go-json-tokenizer"] = TournamentTask(
+    id="go-json-tokenizer",
+    name="JsonTokenizer",
+    lang="go",
+    description=(
+        "A JSON tokenizer that breaks a JSON string into tokens. "
+        "NewTokenizer(input string) *Tokenizer. "
+        "Token struct has Kind (string: one of \"lbrace\", \"rbrace\", \"lbracket\", "
+        "\"rbracket\", \"colon\", \"comma\", \"string\", \"number\", \"true\", \"false\", "
+        "\"null\") and Value (string). "
+        "IMPORTANT: For string tokens, Value MUST be the decoded content with "
+        "quotes STRIPPED — do NOT include the surrounding double-quotes. "
+        "Example: JSON input '\"hello\"' produces Token{Kind: \"string\", Value: \"hello\"} "
+        "(NOT Value: '\"hello\"'). "
+        "Decode escape sequences: \\\\n → actual newline char, \\\\t → tab, "
+        "\\\\\\\\ → single backslash, \\\\\" → double-quote. "
+        "For numbers, Value is the raw text (e.g. \"-3.14\"). "
+        "Method Next() (*Token, error) returns the next token, or nil and nil at EOF, "
+        "or nil and an error for invalid input. "
+        "Numbers: integers, negative, floats (e.g. 42, -3.14, 0.5)."
+    ),
+    expected_class="Tokenizer",
+    methods=[
+        "NewTokenizer(input string) *Tokenizer",
+        "Next() (*Token, error)",
+    ],
+    tests=[
+        ("simple_object", textwrap.dedent("""\
+            func main() {
+                t := NewTokenizer(`{"a": 1}`)
+                tok, _ := t.Next(); if tok.Kind != "lbrace" { panic("expected lbrace") }
+                tok, _ = t.Next(); if tok.Kind != "string" || tok.Value != "a" { panic("string Value must be a (no quotes); got " + tok.Value) }
+                tok, _ = t.Next(); if tok.Kind != "colon" { panic("expected colon") }
+                tok, _ = t.Next(); if tok.Kind != "number" || tok.Value != "1" { panic("expected number 1") }
+                tok, _ = t.Next(); if tok.Kind != "rbrace" { panic("expected rbrace") }
+                tok, _ = t.Next(); if tok != nil { panic("expected EOF") }
+            }
+        """)),
+        ("array", textwrap.dedent("""\
+            func main() {
+                t := NewTokenizer(`[1, 2, 3]`)
+                tok, _ := t.Next(); if tok.Kind != "lbracket" { panic("expected lbracket") }
+                tok, _ = t.Next(); if tok.Kind != "number" { panic("expected number") }
+                tok, _ = t.Next(); if tok.Kind != "comma" { panic("expected comma") }
+                tok, _ = t.Next(); if tok.Kind != "number" { panic("expected number") }
+                tok, _ = t.Next(); if tok.Kind != "comma" { panic("expected comma") }
+                tok, _ = t.Next(); if tok.Kind != "number" { panic("expected number") }
+                tok, _ = t.Next(); if tok.Kind != "rbracket" { panic("expected rbracket") }
+            }
+        """)),
+        ("keywords", textwrap.dedent("""\
+            func main() {
+                t := NewTokenizer(`[true, false, null]`)
+                t.Next() // lbracket
+                tok, _ := t.Next(); if tok.Kind != "true" { panic("expected true") }
+                t.Next() // comma
+                tok, _ = t.Next(); if tok.Kind != "false" { panic("expected false") }
+                t.Next() // comma
+                tok, _ = t.Next(); if tok.Kind != "null" { panic("expected null") }
+            }
+        """)),
+        ("string_escapes", textwrap.dedent("""\
+            func main() {
+                t := NewTokenizer(`"hello\\nworld"`)
+                tok, _ := t.Next()
+                if tok.Kind != "string" { panic("expected string") }
+                if tok.Value != "hello\\nworld" { panic("string Value must NOT include quotes; expected hello\\\\nworld got " + tok.Value) }
+            }
+        """)),
+        ("negative_float", textwrap.dedent("""\
+            func main() {
+                t := NewTokenizer(`-3.14`)
+                tok, _ := t.Next()
+                if tok.Kind != "number" { panic("expected number") }
+                if tok.Value != "-3.14" { panic("expected -3.14") }
+            }
+        """)),
+        ("invalid_input", textwrap.dedent("""\
+            func main() {
+                t := NewTokenizer(`{@}`)
+                t.Next() // lbrace
+                _, err := t.Next()
+                if err == nil { panic("expected error on @") }
+            }
+        """)),
+        ("whitespace", textwrap.dedent("""\
+            func main() {
+                t := NewTokenizer(`  {  }  `)
+                tok, _ := t.Next(); if tok.Kind != "lbrace" { panic("expected lbrace") }
+                tok, _ = t.Next(); if tok.Kind != "rbrace" { panic("expected rbrace") }
+                tok, _ = t.Next(); if tok != nil { panic("expected EOF") }
+            }
+        """)),
+    ],
+    base_difficulty=55,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["go-chan-pipeline"] = TournamentTask(
+    id="go-chan-pipeline",
+    name="Pipeline",
+    lang="go",
+    description=(
+        "A concurrent pipeline using Go channels. "
+        "Pipeline struct with methods: "
+        "NewPipeline[T any]() *Pipeline[T] — creates empty pipeline. "
+        "AddStage(fn func(T) T) — adds a transformation stage. "
+        "Run(input []T, workers int) []T — runs all items through all stages "
+        "with the given number of concurrent workers per stage. "
+        "Output order must match input order. "
+        "Each stage processes items independently — stage N+1 reads from stage N's output channel."
+    ),
+    expected_class="Pipeline",
+    methods=[
+        "NewPipeline[T any]() *Pipeline[T]",
+        "AddStage(fn func(T) T)",
+        "Run(input []T, workers int) []T",
+    ],
+    tests=[
+        ("single_stage", textwrap.dedent("""\
+            func main() {
+                p := NewPipeline[int]()
+                p.AddStage(func(n int) int { return n * 2 })
+                out := p.Run([]int{1, 2, 3}, 1)
+                if len(out) != 3 || out[0] != 2 || out[1] != 4 || out[2] != 6 {
+                    panic(fmt.Sprintf("expected [2 4 6], got %v", out))
+                }
+            }
+        """)),
+        ("multi_stage", textwrap.dedent("""\
+            func main() {
+                p := NewPipeline[int]()
+                p.AddStage(func(n int) int { return n + 10 })
+                p.AddStage(func(n int) int { return n * 2 })
+                out := p.Run([]int{1, 2, 3}, 1)
+                if out[0] != 22 || out[1] != 24 || out[2] != 26 {
+                    panic(fmt.Sprintf("expected [22 24 26], got %v", out))
+                }
+            }
+        """)),
+        ("preserves_order", textwrap.dedent("""\
+            func main() {
+                p := NewPipeline[int]()
+                p.AddStage(func(n int) int {
+                    time.Sleep(time.Duration(100-n) * time.Millisecond)
+                    return n
+                })
+                out := p.Run([]int{1, 50, 99}, 3)
+                if out[0] != 1 || out[1] != 50 || out[2] != 99 {
+                    panic(fmt.Sprintf("order not preserved: %v", out))
+                }
+            }
+        """)),
+        ("concurrent_workers", textwrap.dedent("""\
+            func main() {
+                var maxConcurrent int64
+                var current int64
+                p := NewPipeline[int]()
+                p.AddStage(func(n int) int {
+                    c := atomic.AddInt64(&current, 1)
+                    for {
+                        old := atomic.LoadInt64(&maxConcurrent)
+                        if c <= old || atomic.CompareAndSwapInt64(&maxConcurrent, old, c) { break }
+                    }
+                    time.Sleep(20 * time.Millisecond)
+                    atomic.AddInt64(&current, -1)
+                    return n
+                })
+                p.Run([]int{1, 2, 3, 4, 5}, 3)
+                peak := atomic.LoadInt64(&maxConcurrent)
+                if peak < 2 { panic(fmt.Sprintf("expected concurrency >= 2, got %d", peak)) }
+            }
+        """)),
+        ("empty_input", textwrap.dedent("""\
+            func main() {
+                p := NewPipeline[int]()
+                p.AddStage(func(n int) int { return n })
+                out := p.Run([]int{}, 2)
+                if len(out) != 0 { panic("expected empty output") }
+            }
+        """)),
+        ("string_type", textwrap.dedent("""\
+            func main() {
+                p := NewPipeline[string]()
+                p.AddStage(func(s string) string { return s + "!" })
+                out := p.Run([]string{"hi", "go"}, 2)
+                if out[0] != "hi!" || out[1] != "go!" {
+                    panic(fmt.Sprintf("expected [hi! go!], got %v", out))
+                }
+            }
+        """)),
+    ],
+    base_difficulty=65,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["go-json-parser"] = TournamentTask(
+    id="go-json-parser",
+    name="JsonParser",
+    lang="go",
+    description=(
+        "A recursive-descent JSON parser. "
+        "Parse(input string) (any, error) parses a JSON string and returns a Go value: "
+        "null -> nil, booleans -> bool, numbers -> float64, strings -> string, "
+        "arrays -> []any, objects -> map[string]any. "
+        "Supports: null, true, false, numbers (integer, negative, float), "
+        "strings (with escapes \\n \\t \\\\ \\\"), arrays, nested objects. "
+        "Returns an error for invalid JSON. Whitespace is ignored."
+    ),
+    expected_class="Parser",
+    methods=[
+        "Parse(input string) (any, error)",
+    ],
+    tests=[
+        ("parse_null", textwrap.dedent("""\
+            func main() {
+                v, err := Parse("null")
+                if err != nil { panic(err) }
+                if v != nil { panic("expected nil") }
+            }
+        """)),
+        ("parse_bool", textwrap.dedent("""\
+            func main() {
+                v, _ := Parse("true")
+                if v != true { panic("expected true") }
+                v, _ = Parse("false")
+                if v != false { panic("expected false") }
+            }
+        """)),
+        ("parse_number", textwrap.dedent("""\
+            func main() {
+                v, _ := Parse("42")
+                if v.(float64) != 42.0 { panic("expected 42") }
+                v, _ = Parse("-3.14")
+                n := v.(float64)
+                if n < -3.15 || n > -3.13 { panic("expected -3.14") }
+            }
+        """)),
+        ("parse_string", textwrap.dedent("""\
+            func main() {
+                v, _ := Parse(`"hello"`)
+                if v.(string) != "hello" { panic("expected hello") }
+                v, _ = Parse(`"a\\nb"`)
+                if v.(string) != "a\\nb" { panic("expected a\\nb") }
+            }
+        """)),
+        ("parse_array", textwrap.dedent("""\
+            func main() {
+                v, _ := Parse("[1, 2, 3]")
+                arr := v.([]any)
+                if len(arr) != 3 { panic("expected 3 items") }
+                if arr[0].(float64) != 1.0 { panic("expected 1") }
+            }
+        """)),
+        ("parse_object", textwrap.dedent("""\
+            func main() {
+                v, _ := Parse(`{"a": 1, "b": "two"}`)
+                obj := v.(map[string]any)
+                if obj["a"].(float64) != 1.0 { panic("expected 1") }
+                if obj["b"].(string) != "two" { panic("expected two") }
+            }
+        """)),
+        ("parse_nested", textwrap.dedent("""\
+            func main() {
+                v, _ := Parse(`{"list": [1, {"nested": true}]}`)
+                obj := v.(map[string]any)
+                arr := obj["list"].([]any)
+                inner := arr[1].(map[string]any)
+                if inner["nested"] != true { panic("expected true") }
+            }
+        """)),
+        ("parse_error", textwrap.dedent("""\
+            func main() {
+                _, err := Parse("{invalid}")
+                if err == nil { panic("expected error") }
+                _, err = Parse("")
+                if err == nil { panic("expected error on empty") }
+            }
+        """)),
+    ],
+    base_difficulty=70,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["go-worker-pool"] = TournamentTask(
+    id="go-worker-pool",
+    name="WorkerPool",
+    lang="go",
+    description=(
+        "A worker pool with job submission, results, and graceful shutdown. "
+        "NewWorkerPool(size int) *WorkerPool — creates pool with given number of workers. "
+        "Start() — launches worker goroutines. "
+        "Submit(fn func() (any, error)) int64 — submits a job, returns a job ID (monotonically increasing from 1). "
+        "Result(id int64) (any, error, bool) — returns (value, err, found). "
+        "Found is false if the job hasn't completed yet. "
+        "Shutdown() — waits for all submitted jobs to complete, then stops workers. "
+        "After Shutdown, Submit panics."
+    ),
+    expected_class="WorkerPool",
+    methods=[
+        "NewWorkerPool(size int) *WorkerPool",
+        "Start()",
+        "Submit(fn func() (any, error)) int64",
+        "Result(id int64) (any, error, bool)",
+        "Shutdown()",
+    ],
+    tests=[
+        ("basic_submit", textwrap.dedent("""\
+            func main() {
+                p := NewWorkerPool(2)
+                p.Start()
+                id := p.Submit(func() (any, error) { return 42, nil })
+                p.Shutdown()
+                val, err, found := p.Result(id)
+                if !found { panic("job not found") }
+                if err != nil { panic("unexpected error") }
+                if val.(int) != 42 { panic(fmt.Sprintf("expected 42, got %v", val)) }
+            }
+        """)),
+        ("multiple_jobs", textwrap.dedent("""\
+            func main() {
+                p := NewWorkerPool(3)
+                p.Start()
+                ids := make([]int64, 10)
+                for i := 0; i < 10; i++ {
+                    n := i
+                    ids[i] = p.Submit(func() (any, error) { return n * 2, nil })
+                }
+                p.Shutdown()
+                for i, id := range ids {
+                    val, _, found := p.Result(id)
+                    if !found { panic("missing result") }
+                    if val.(int) != i*2 { panic(fmt.Sprintf("job %d: expected %d got %v", id, i*2, val)) }
+                }
+            }
+        """)),
+        ("error_handling", textwrap.dedent("""\
+            func main() {
+                p := NewWorkerPool(1)
+                p.Start()
+                id := p.Submit(func() (any, error) { return nil, fmt.Errorf("boom") })
+                p.Shutdown()
+                _, err, found := p.Result(id)
+                if !found { panic("job not found") }
+                if err == nil || err.Error() != "boom" { panic("expected error boom") }
+            }
+        """)),
+        ("concurrent_execution", textwrap.dedent("""\
+            func main() {
+                var maxConcurrent int64
+                var current int64
+                p := NewWorkerPool(3)
+                p.Start()
+                for i := 0; i < 6; i++ {
+                    p.Submit(func() (any, error) {
+                        c := atomic.AddInt64(&current, 1)
+                        for {
+                            old := atomic.LoadInt64(&maxConcurrent)
+                            if c <= old || atomic.CompareAndSwapInt64(&maxConcurrent, old, c) { break }
+                        }
+                        time.Sleep(30 * time.Millisecond)
+                        atomic.AddInt64(&current, -1)
+                        return nil, nil
+                    })
+                }
+                p.Shutdown()
+                if atomic.LoadInt64(&maxConcurrent) < 2 { panic("expected concurrent execution") }
+            }
+        """)),
+        ("monotonic_ids", textwrap.dedent("""\
+            func main() {
+                p := NewWorkerPool(1)
+                p.Start()
+                id1 := p.Submit(func() (any, error) { return nil, nil })
+                id2 := p.Submit(func() (any, error) { return nil, nil })
+                id3 := p.Submit(func() (any, error) { return nil, nil })
+                p.Shutdown()
+                if id1 >= id2 || id2 >= id3 { panic("ids not monotonic") }
+            }
+        """)),
+        ("shutdown_completes_pending", textwrap.dedent("""\
+            func main() {
+                p := NewWorkerPool(1)
+                p.Start()
+                id := p.Submit(func() (any, error) {
+                    time.Sleep(50 * time.Millisecond)
+                    return "done", nil
+                })
+                p.Shutdown()
+                val, _, found := p.Result(id)
+                if !found || val.(string) != "done" { panic("shutdown should complete pending jobs") }
+            }
+        """)),
+    ],
+    base_difficulty=80,
+    spec_clarity=85,
+)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JAVA TASKS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+TASKS["java-stack"] = TournamentTask(
+    id="java-stack",
+    name="GenericStack",
+    lang="java",
+    description=(
+        "A generic stack data structure. "
+        "GenericStack<T> with methods: void push(T val), T pop() throws if empty, "
+        "T peek() throws if empty, int size(), boolean isEmpty(). "
+        "Pop and peek throw NoSuchElementException when empty."
+    ),
+    expected_class="GenericStack",
+    methods=[
+        "void push(T val)",
+        "T pop()",
+        "T peek()",
+        "int size()",
+        "boolean isEmpty()",
+    ],
+    tests=[
+        ("push_pop", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    GenericStack<Integer> s = new GenericStack<>();
+                    s.push(10);
+                    s.push(20);
+                    assert s.pop() == 20 : "expected 20";
+                    assert s.pop() == 10 : "expected 10";
+                }
+            }
+        """)),
+        ("empty_pop", textwrap.dedent("""\
+            import java.util.NoSuchElementException;
+            public class Main {
+                public static void main(String[] args) {
+                    GenericStack<String> s = new GenericStack<>();
+                    try { s.pop(); throw new RuntimeException("should throw"); }
+                    catch (NoSuchElementException e) { /* ok */ }
+                }
+            }
+        """)),
+        ("peek", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    GenericStack<String> s = new GenericStack<>();
+                    s.push("hello");
+                    assert s.peek().equals("hello") : "expected hello";
+                    assert s.size() == 1 : "peek should not remove";
+                }
+            }
+        """)),
+        ("size_empty", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    GenericStack<Integer> s = new GenericStack<>();
+                    assert s.isEmpty() : "should be empty";
+                    s.push(1);
+                    assert !s.isEmpty() : "should not be empty";
+                    assert s.size() == 1 : "expected 1";
+                }
+            }
+        """)),
+        ("string_type", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    GenericStack<String> s = new GenericStack<>();
+                    s.push("a");
+                    s.push("b");
+                    assert s.pop().equals("b") : "expected b";
+                }
+            }
+        """)),
+    ],
+    base_difficulty=15,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["java-rate-limiter"] = TournamentTask(
+    id="java-rate-limiter",
+    name="RateLimiter",
+    lang="java",
+    description=(
+        "A sliding-window rate limiter. "
+        "Constructor: RateLimiter(int maxCalls, long periodMs). "
+        "Methods: boolean allow() — true if under limit, "
+        "int remaining() — calls left in window, "
+        "void reset() — clears history."
+    ),
+    expected_class="RateLimiter",
+    methods=[
+        "RateLimiter(int maxCalls, long periodMs)",
+        "boolean allow()",
+        "int remaining()",
+        "void reset()",
+    ],
+    tests=[
+        ("basic_limiting", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    RateLimiter rl = new RateLimiter(2, 1000);
+                    assert rl.allow() : "first should pass";
+                    assert rl.allow() : "second should pass";
+                    assert !rl.allow() : "third should fail";
+                }
+            }
+        """)),
+        ("remaining", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    RateLimiter rl = new RateLimiter(3, 1000);
+                    assert rl.remaining() == 3 : "expected 3";
+                    rl.allow();
+                    assert rl.remaining() == 2 : "expected 2";
+                }
+            }
+        """)),
+        ("reset", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    RateLimiter rl = new RateLimiter(1, 1000);
+                    rl.allow();
+                    assert !rl.allow() : "should be limited";
+                    rl.reset();
+                    assert rl.allow() : "should pass after reset";
+                }
+            }
+        """)),
+        ("window_expiry", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) throws Exception {
+                    RateLimiter rl = new RateLimiter(1, 50);
+                    rl.allow();
+                    assert !rl.allow() : "should be limited";
+                    Thread.sleep(60);
+                    assert rl.allow() : "should pass after window";
+                }
+            }
+        """)),
+        ("zero_max", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    RateLimiter rl = new RateLimiter(0, 1000);
+                    assert !rl.allow() : "zero max should deny all";
+                }
+            }
+        """)),
+    ],
+    base_difficulty=30,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["java-lru-cache"] = TournamentTask(
+    id="java-lru-cache",
+    name="LRUCache",
+    lang="java",
+    description=(
+        "A generic LRU cache with a capacity limit. "
+        "LRUCache<K, V> with constructor LRUCache(int capacity). "
+        "Methods: V get(K key) — returns value or null if not found (marks as recently used), "
+        "void put(K key, V value) — adds or updates (evicts LRU if at capacity), "
+        "int size(). "
+        "Do NOT use java.util.LinkedHashMap."
+    ),
+    expected_class="LRUCache",
+    methods=[
+        "LRUCache(int capacity)",
+        "V get(K key)",
+        "void put(K key, V value)",
+        "int size()",
+    ],
+    tests=[
+        ("basic_get_put", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    LRUCache<String, Integer> c = new LRUCache<>(2);
+                    c.put("a", 1);
+                    assert c.get("a") == 1 : "expected 1";
+                }
+            }
+        """)),
+        ("eviction", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    LRUCache<String, Integer> c = new LRUCache<>(2);
+                    c.put("a", 1);
+                    c.put("b", 2);
+                    c.put("c", 3);  // evicts "a"
+                    assert c.get("a") == null : "a should be evicted";
+                    assert c.get("b") == 2 : "b should exist";
+                }
+            }
+        """)),
+        ("access_refreshes", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    LRUCache<String, Integer> c = new LRUCache<>(2);
+                    c.put("a", 1);
+                    c.put("b", 2);
+                    c.get("a");       // refresh a
+                    c.put("c", 3);   // evicts b (not a)
+                    assert c.get("b") == null : "b should be evicted";
+                    assert c.get("a") == 1 : "a should exist";
+                }
+            }
+        """)),
+        ("update_existing", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    LRUCache<String, Integer> c = new LRUCache<>(2);
+                    c.put("a", 1);
+                    c.put("a", 99);
+                    assert c.get("a") == 99 : "expected updated value";
+                    assert c.size() == 1 : "expected size 1";
+                }
+            }
+        """)),
+        ("miss", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    LRUCache<String, String> c = new LRUCache<>(5);
+                    assert c.get("nope") == null : "should return null";
+                }
+            }
+        """)),
+        ("size", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    LRUCache<Integer, Integer> c = new LRUCache<>(10);
+                    assert c.size() == 0 : "expected 0";
+                    c.put(1, 1);
+                    c.put(2, 2);
+                    assert c.size() == 2 : "expected 2";
+                }
+            }
+        """)),
+    ],
+    base_difficulty=40,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["java-event-emitter"] = TournamentTask(
+    id="java-event-emitter",
+    name="EventEmitter",
+    lang="java",
+    description=(
+        "A typed event emitter with subscribe, unsubscribe, and emit. "
+        "EventEmitter with methods: "
+        "int on(String event, java.util.function.Consumer<Object> listener) — "
+        "registers listener, returns a subscription ID. "
+        "void off(int subscriptionId) — removes a listener by its ID. "
+        "void emit(String event, Object data) — calls all listeners for that event in registration order. "
+        "void once(String event, java.util.function.Consumer<Object> listener) — "
+        "listener fires at most once then auto-unsubscribes. "
+        "int listenerCount(String event) — number of active listeners for event."
+    ),
+    expected_class="EventEmitter",
+    methods=[
+        "int on(String event, Consumer<Object> listener)",
+        "void off(int subscriptionId)",
+        "void emit(String event, Object data)",
+        "void once(String event, Consumer<Object> listener)",
+        "int listenerCount(String event)",
+    ],
+    tests=[
+        ("basic_emit", textwrap.dedent("""\
+            import java.util.*;
+            import java.util.function.*;
+            public class Main {
+                public static void main(String[] args) {
+                    EventEmitter ee = new EventEmitter();
+                    List<Object> received = new ArrayList<>();
+                    ee.on("data", received::add);
+                    ee.emit("data", "hello");
+                    assert received.size() == 1 : "expected 1";
+                    assert received.get(0).equals("hello") : "expected hello";
+                }
+            }
+        """)),
+        ("multiple_listeners", textwrap.dedent("""\
+            import java.util.*;
+            import java.util.function.*;
+            public class Main {
+                public static void main(String[] args) {
+                    EventEmitter ee = new EventEmitter();
+                    List<String> log = new ArrayList<>();
+                    ee.on("x", d -> log.add("a:" + d));
+                    ee.on("x", d -> log.add("b:" + d));
+                    ee.emit("x", 1);
+                    assert log.size() == 2 : "expected 2";
+                    assert log.get(0).equals("a:1") : "expected a:1 first";
+                }
+            }
+        """)),
+        ("off", textwrap.dedent("""\
+            import java.util.*;
+            import java.util.function.*;
+            public class Main {
+                public static void main(String[] args) {
+                    EventEmitter ee = new EventEmitter();
+                    List<Object> log = new ArrayList<>();
+                    int id = ee.on("x", log::add);
+                    ee.emit("x", 1);
+                    ee.off(id);
+                    ee.emit("x", 2);
+                    assert log.size() == 1 : "expected only 1 after off";
+                }
+            }
+        """)),
+        ("once", textwrap.dedent("""\
+            import java.util.*;
+            import java.util.function.*;
+            public class Main {
+                public static void main(String[] args) {
+                    EventEmitter ee = new EventEmitter();
+                    List<Object> log = new ArrayList<>();
+                    ee.once("x", log::add);
+                    ee.emit("x", "first");
+                    ee.emit("x", "second");
+                    assert log.size() == 1 : "once should fire once";
+                    assert log.get(0).equals("first") : "expected first";
+                }
+            }
+        """)),
+        ("listener_count", textwrap.dedent("""\
+            import java.util.function.*;
+            public class Main {
+                public static void main(String[] args) {
+                    EventEmitter ee = new EventEmitter();
+                    assert ee.listenerCount("x") == 0 : "expected 0";
+                    int id = ee.on("x", d -> {});
+                    assert ee.listenerCount("x") == 1 : "expected 1";
+                    ee.off(id);
+                    assert ee.listenerCount("x") == 0 : "expected 0 after off";
+                }
+            }
+        """)),
+        ("no_crosstalk", textwrap.dedent("""\
+            import java.util.*;
+            import java.util.function.*;
+            public class Main {
+                public static void main(String[] args) {
+                    EventEmitter ee = new EventEmitter();
+                    List<Object> log = new ArrayList<>();
+                    ee.on("a", log::add);
+                    ee.emit("b", "nope");
+                    assert log.isEmpty() : "different events should not crosstalk";
+                }
+            }
+        """)),
+    ],
+    base_difficulty=45,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["java-expr-parser"] = TournamentTask(
+    id="java-expr-parser",
+    name="ExprParser",
+    lang="java",
+    description=(
+        "A mathematical expression parser and evaluator. "
+        "ExprParser with method: double evaluate(String expr). "
+        "Supports: +, -, *, / with standard precedence (* and / before + and -). "
+        "Supports parentheses for grouping. Supports negative numbers. "
+        "Supports floating-point numbers. Whitespace is ignored. "
+        "Throws IllegalArgumentException for invalid expressions."
+    ),
+    expected_class="ExprParser",
+    methods=[
+        "double evaluate(String expr)",
+    ],
+    tests=[
+        ("simple_add", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    assert Math.abs(p.evaluate("2 + 3") - 5.0) < 1e-9 : "expected 5";
+                }
+            }
+        """)),
+        ("precedence", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    assert Math.abs(p.evaluate("2 + 3 * 4") - 14.0) < 1e-9 : "expected 14";
+                }
+            }
+        """)),
+        ("parens", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    assert Math.abs(p.evaluate("(2 + 3) * 4") - 20.0) < 1e-9 : "expected 20";
+                }
+            }
+        """)),
+        ("division", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    assert Math.abs(p.evaluate("10 / 4") - 2.5) < 1e-9 : "expected 2.5";
+                }
+            }
+        """)),
+        ("negative", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    assert Math.abs(p.evaluate("-3 + 5") - 2.0) < 1e-9 : "expected 2";
+                }
+            }
+        """)),
+        ("nested_parens", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    assert Math.abs(p.evaluate("((2 + 3) * (4 - 1))") - 15.0) < 1e-9 : "expected 15";
+                }
+            }
+        """)),
+        ("float", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    assert Math.abs(p.evaluate("1.5 * 2") - 3.0) < 1e-9 : "expected 3.0";
+                }
+            }
+        """)),
+        ("complex", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    assert Math.abs(p.evaluate("3 + 4 * 2 / (1 - 5)") - 1.0) < 1e-9 : "expected 1";
+                }
+            }
+        """)),
+        ("invalid", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    ExprParser p = new ExprParser();
+                    try { p.evaluate("2 +"); throw new RuntimeException("should throw"); }
+                    catch (IllegalArgumentException e) { /* ok */ }
+                }
+            }
+        """)),
+    ],
+    base_difficulty=60,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["java-json-parser"] = TournamentTask(
+    id="java-json-parser",
+    name="JsonParser",
+    lang="java",
+    description=(
+        "A recursive-descent JSON parser. "
+        "JsonParser with method: Object parse(String input). "
+        "Returns: null for JSON null, Boolean for true/false, Double for numbers, "
+        "String for strings, java.util.List<Object> for arrays, "
+        "java.util.Map<String, Object> for objects. "
+        "Supports: null, booleans, numbers (integer, negative, float), "
+        "strings (with escapes \\\\, \\\", \\n, \\t), arrays, nested objects. "
+        "Throws IllegalArgumentException for invalid JSON."
+    ),
+    expected_class="JsonParser",
+    methods=[
+        "Object parse(String input)",
+    ],
+    tests=[
+        ("parse_null", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    assert p.parse("null") == null : "expected null";
+                }
+            }
+        """)),
+        ("parse_bool", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    assert p.parse("true").equals(Boolean.TRUE) : "expected true";
+                    assert p.parse("false").equals(Boolean.FALSE) : "expected false";
+                }
+            }
+        """)),
+        ("parse_number", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    assert (Double) p.parse("42") == 42.0 : "expected 42";
+                    double n = (Double) p.parse("-3.14");
+                    assert Math.abs(n + 3.14) < 1e-9 : "expected -3.14";
+                }
+            }
+        """)),
+        ("parse_string", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    assert p.parse("\\"hello\\"").equals("hello") : "expected hello";
+                }
+            }
+        """)),
+        ("parse_string_escapes", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    String s = (String) p.parse("\\"a\\\\nb\\"");
+                    assert s.equals("a\\nb") : "expected a\\nb, got " + s;
+                }
+            }
+        """)),
+        ("parse_array", textwrap.dedent("""\
+            import java.util.*;
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    List<?> arr = (List<?>) p.parse("[1, 2, 3]");
+                    assert arr.size() == 3 : "expected 3";
+                    assert (Double) arr.get(0) == 1.0 : "expected 1";
+                }
+            }
+        """)),
+        ("parse_object", textwrap.dedent("""\
+            import java.util.*;
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    Map<?, ?> obj = (Map<?, ?>) p.parse("{\\"a\\": 1, \\"b\\": \\"two\\"}");
+                    assert (Double) obj.get("a") == 1.0 : "expected 1";
+                    assert obj.get("b").equals("two") : "expected two";
+                }
+            }
+        """)),
+        ("parse_nested", textwrap.dedent("""\
+            import java.util.*;
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    Map<?, ?> obj = (Map<?, ?>) p.parse("{\\"list\\": [1, {\\"nested\\": true}]}");
+                    List<?> arr = (List<?>) obj.get("list");
+                    Map<?, ?> inner = (Map<?, ?>) arr.get(1);
+                    assert inner.get("nested").equals(Boolean.TRUE) : "expected true";
+                }
+            }
+        """)),
+        ("parse_error", textwrap.dedent("""\
+            public class Main {
+                public static void main(String[] args) {
+                    JsonParser p = new JsonParser();
+                    try { p.parse("{invalid}"); throw new RuntimeException("should throw"); }
+                    catch (IllegalArgumentException e) { /* ok */ }
+                }
+            }
+        """)),
+    ],
+    base_difficulty=70,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["java-thread-pool"] = TournamentTask(
+    id="java-thread-pool",
+    name="SimpleThreadPool",
+    lang="java",
+    description=(
+        "A simple thread pool (not using java.util.concurrent.ExecutorService). "
+        "SimpleThreadPool with constructor SimpleThreadPool(int size). "
+        "Methods: void start() — starts worker threads. "
+        "long submit(java.util.concurrent.Callable<Object> task) — submits task, "
+        "returns monotonically increasing job ID starting from 1. "
+        "Object getResult(long id) — blocks until job completes, returns result. "
+        "Throws RuntimeException wrapping the original if the job failed. "
+        "void shutdown() — waits for all submitted jobs, then stops threads. "
+        "After shutdown, submit throws IllegalStateException. "
+        "Must not use ExecutorService, ThreadPoolExecutor, or ForkJoinPool."
+    ),
+    expected_class="SimpleThreadPool",
+    methods=[
+        "SimpleThreadPool(int size)",
+        "void start()",
+        "long submit(Callable<Object> task)",
+        "Object getResult(long id)",
+        "void shutdown()",
+    ],
+    tests=[
+        ("basic_submit", textwrap.dedent("""\
+            import java.util.concurrent.Callable;
+            public class Main {
+                public static void main(String[] args) throws Exception {
+                    SimpleThreadPool pool = new SimpleThreadPool(2);
+                    pool.start();
+                    long id = pool.submit(() -> 42);
+                    Object result = pool.getResult(id);
+                    assert result.equals(42) : "expected 42, got " + result;
+                    pool.shutdown();
+                }
+            }
+        """)),
+        ("multiple_jobs", textwrap.dedent("""\
+            import java.util.concurrent.Callable;
+            public class Main {
+                public static void main(String[] args) throws Exception {
+                    SimpleThreadPool pool = new SimpleThreadPool(3);
+                    pool.start();
+                    long[] ids = new long[10];
+                    for (int i = 0; i < 10; i++) {
+                        final int n = i;
+                        ids[i] = pool.submit(() -> n * 2);
+                    }
+                    for (int i = 0; i < 10; i++) {
+                        Object r = pool.getResult(ids[i]);
+                        assert r.equals(i * 2) : "job " + ids[i] + " expected " + (i*2) + " got " + r;
+                    }
+                    pool.shutdown();
+                }
+            }
+        """)),
+        ("error_handling", textwrap.dedent("""\
+            import java.util.concurrent.Callable;
+            public class Main {
+                public static void main(String[] args) {
+                    SimpleThreadPool pool = new SimpleThreadPool(1);
+                    pool.start();
+                    long id = pool.submit(() -> { throw new RuntimeException("boom"); });
+                    try {
+                        pool.getResult(id);
+                        throw new AssertionError("should have thrown");
+                    } catch (RuntimeException e) {
+                        assert e.getMessage().contains("boom") || (e.getCause() != null && e.getCause().getMessage().contains("boom"))
+                            : "expected boom in error";
+                    }
+                    pool.shutdown();
+                }
+            }
+        """)),
+        ("monotonic_ids", textwrap.dedent("""\
+            import java.util.concurrent.Callable;
+            public class Main {
+                public static void main(String[] args) throws Exception {
+                    SimpleThreadPool pool = new SimpleThreadPool(1);
+                    pool.start();
+                    long id1 = pool.submit(() -> null);
+                    long id2 = pool.submit(() -> null);
+                    long id3 = pool.submit(() -> null);
+                    assert id1 < id2 && id2 < id3 : "ids not monotonic";
+                    pool.shutdown();
+                }
+            }
+        """)),
+        ("shutdown_completes_pending", textwrap.dedent("""\
+            import java.util.concurrent.Callable;
+            public class Main {
+                public static void main(String[] args) throws Exception {
+                    SimpleThreadPool pool = new SimpleThreadPool(1);
+                    pool.start();
+                    long id = pool.submit(() -> {
+                        Thread.sleep(50);
+                        return "done";
+                    });
+                    pool.shutdown();
+                    assert pool.getResult(id).equals("done") : "pending job should complete";
+                }
+            }
+        """)),
+        ("shutdown_rejects", textwrap.dedent("""\
+            import java.util.concurrent.Callable;
+            public class Main {
+                public static void main(String[] args) throws Exception {
+                    SimpleThreadPool pool = new SimpleThreadPool(1);
+                    pool.start();
+                    pool.shutdown();
+                    try {
+                        pool.submit(() -> null);
+                        throw new AssertionError("should throw after shutdown");
+                    } catch (IllegalStateException e) { /* ok */ }
+                }
+            }
+        """)),
+    ],
+    base_difficulty=80,
+    spec_clarity=85,
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# C# tasks
+# ═══════════════════════════════════════════════════════════════════════════════
+
+TASKS["csharp-stack"] = TournamentTask(
+    id="csharp-stack",
+    name="Stack",
+    lang="csharp",
+    description=(
+        "A generic stack using an array. "
+        "Stack<T> with constructor Stack(int capacity). "
+        "Methods: void Push(T item), T Pop(), T Peek(), "
+        "bool IsEmpty (property), int Count (property). "
+        "Pop and Peek throw InvalidOperationException when empty. "
+        "Push doubles capacity when full via Array.Resize."
+    ),
+    expected_class="Stack",
+    methods=["Push(T item)", "Pop()", "Peek()", "IsEmpty", "Count"],
+    tests=[
+        ("push_pop", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var s = new Stack<int>(2);
+                    s.Push(10); s.Push(20); s.Push(30);
+                    if (s.Pop() != 30) throw new System.Exception("pop 30");
+                    if (s.Pop() != 20) throw new System.Exception("pop 20");
+                    if (s.Pop() != 10) throw new System.Exception("pop 10");
+                }
+            }
+        """)),
+        ("empty_pop", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var s = new Stack<string>(4);
+                    try { s.Pop(); throw new System.Exception("should throw"); }
+                    catch (System.InvalidOperationException) { }
+                    try { s.Peek(); throw new System.Exception("should throw"); }
+                    catch (System.InvalidOperationException) { }
+                }
+            }
+        """)),
+        ("peek", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var s = new Stack<int>(4);
+                    s.Push(1); s.Push(2);
+                    if (s.Peek() != 2) throw new System.Exception("peek");
+                    if (s.Count != 2) throw new System.Exception("count");
+                    s.Pop();
+                    if (s.Peek() != 1) throw new System.Exception("peek after pop");
+                }
+            }
+        """)),
+        ("is_empty", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var s = new Stack<int>(4);
+                    if (!s.IsEmpty) throw new System.Exception("should be empty");
+                    s.Push(1);
+                    if (s.IsEmpty) throw new System.Exception("should not be empty");
+                    s.Pop();
+                    if (!s.IsEmpty) throw new System.Exception("should be empty again");
+                }
+            }
+        """)),
+        ("grow", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var s = new Stack<int>(1);
+                    for (int i = 0; i < 100; i++) s.Push(i);
+                    if (s.Count != 100) throw new System.Exception("count");
+                    for (int i = 99; i >= 0; i--) {
+                        if (s.Pop() != i) throw new System.Exception("pop " + i);
+                    }
+                }
+            }
+        """)),
+    ],
+    base_difficulty=15,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["csharp-lru-cache"] = TournamentTask(
+    id="csharp-lru-cache",
+    name="LruCache",
+    lang="csharp",
+    description=(
+        "A generic LRU cache with O(1) get and put. "
+        "LruCache<TKey, TValue> with constructor LruCache(int capacity). "
+        "Methods: TValue Get(TKey key) — returns value, throws KeyNotFoundException if missing, "
+        "marks as recently used. "
+        "void Put(TKey key, TValue value) — inserts or updates, evicts least recently used if at capacity. "
+        "int Count (property) — number of entries."
+    ),
+    expected_class="LruCache",
+    methods=[
+        "LruCache(int capacity)",
+        "TValue Get(TKey key)",
+        "void Put(TKey key, TValue value)",
+        "Count",
+    ],
+    tests=[
+        ("basic_get_put", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var c = new LruCache<string, int>(3);
+                    c.Put("a", 1); c.Put("b", 2); c.Put("c", 3);
+                    if (c.Get("a") != 1) throw new System.Exception("a");
+                    if (c.Get("b") != 2) throw new System.Exception("b");
+                    if (c.Count != 3) throw new System.Exception("count");
+                }
+            }
+        """)),
+        ("eviction", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var c = new LruCache<string, int>(2);
+                    c.Put("a", 1); c.Put("b", 2);
+                    c.Put("c", 3);  // evicts "a"
+                    try { c.Get("a"); throw new System.Exception("a should be evicted"); }
+                    catch (System.Collections.Generic.KeyNotFoundException) { }
+                    if (c.Get("b") != 2) throw new System.Exception("b");
+                    if (c.Get("c") != 3) throw new System.Exception("c");
+                }
+            }
+        """)),
+        ("access_refreshes", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var c = new LruCache<string, int>(2);
+                    c.Put("a", 1); c.Put("b", 2);
+                    c.Get("a");  // refreshes "a"
+                    c.Put("c", 3);  // evicts "b" (least recent), not "a"
+                    if (c.Get("a") != 1) throw new System.Exception("a should survive");
+                    try { c.Get("b"); throw new System.Exception("b should be evicted"); }
+                    catch (System.Collections.Generic.KeyNotFoundException) { }
+                }
+            }
+        """)),
+        ("update_existing", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var c = new LruCache<string, int>(2);
+                    c.Put("a", 1); c.Put("a", 99);
+                    if (c.Get("a") != 99) throw new System.Exception("update");
+                    if (c.Count != 1) throw new System.Exception("count after update");
+                }
+            }
+        """)),
+        ("capacity_one", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var c = new LruCache<int, int>(1);
+                    c.Put(1, 10); c.Put(2, 20);
+                    try { c.Get(1); throw new System.Exception("1 evicted"); }
+                    catch (System.Collections.Generic.KeyNotFoundException) { }
+                    if (c.Get(2) != 20) throw new System.Exception("2");
+                }
+            }
+        """)),
+    ],
+    base_difficulty=40,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["csharp-expr-parser"] = TournamentTask(
+    id="csharp-expr-parser",
+    name="ExprParser",
+    lang="csharp",
+    description=(
+        "An arithmetic expression parser and evaluator using recursive descent. "
+        "ExprParser with static method: static double Evaluate(string expr). "
+        "Supports: +, -, *, / operators with standard precedence (* and / before + and -), "
+        "parentheses for grouping, unary minus, integer and floating-point literals. "
+        "Whitespace between tokens is allowed. "
+        "Throws FormatException for invalid expressions. "
+        "Division by zero throws DivideByZeroException."
+    ),
+    expected_class="ExprParser",
+    methods=["static double Evaluate(string expr)"],
+    tests=[
+        ("simple_add", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    double r = ExprParser.Evaluate("2 + 3");
+                    if (System.Math.Abs(r - 5.0) > 0.001) throw new System.Exception("2+3=" + r);
+                }
+            }
+        """)),
+        ("precedence", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    double r = ExprParser.Evaluate("2 + 3 * 4");
+                    if (System.Math.Abs(r - 14.0) > 0.001) throw new System.Exception("precedence: " + r);
+                }
+            }
+        """)),
+        ("parentheses", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    double r = ExprParser.Evaluate("(2 + 3) * 4");
+                    if (System.Math.Abs(r - 20.0) > 0.001) throw new System.Exception("parens: " + r);
+                }
+            }
+        """)),
+        ("unary_minus", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    double r = ExprParser.Evaluate("-5 + 3");
+                    if (System.Math.Abs(r - (-2.0)) > 0.001) throw new System.Exception("unary: " + r);
+                    r = ExprParser.Evaluate("-(2 + 3)");
+                    if (System.Math.Abs(r - (-5.0)) > 0.001) throw new System.Exception("unary paren: " + r);
+                }
+            }
+        """)),
+        ("nested_parens", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    double r = ExprParser.Evaluate("((1 + 2) * (3 + 4))");
+                    if (System.Math.Abs(r - 21.0) > 0.001) throw new System.Exception("nested: " + r);
+                }
+            }
+        """)),
+        ("floats", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    double r = ExprParser.Evaluate("3.14 * 2");
+                    if (System.Math.Abs(r - 6.28) > 0.001) throw new System.Exception("float: " + r);
+                }
+            }
+        """)),
+        ("division", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    double r = ExprParser.Evaluate("10 / 4");
+                    if (System.Math.Abs(r - 2.5) > 0.001) throw new System.Exception("div: " + r);
+                }
+            }
+        """)),
+        ("complex", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    double r = ExprParser.Evaluate("2 * (3 + 4) / 7 - 1");
+                    if (System.Math.Abs(r - 1.0) > 0.001) throw new System.Exception("complex: " + r);
+                }
+            }
+        """)),
+        ("div_by_zero", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    try { ExprParser.Evaluate("1 / 0"); throw new System.Exception("should throw"); }
+                    catch (System.DivideByZeroException) { }
+                }
+            }
+        """)),
+    ],
+    base_difficulty=60,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["csharp-json-parser"] = TournamentTask(
+    id="csharp-json-parser",
+    name="JsonParser",
+    lang="csharp",
+    description=(
+        "A recursive-descent JSON parser. "
+        "JsonParser with static method: static object Parse(string json). "
+        "Returns: Dictionary<string, object> for objects, List<object> for arrays, "
+        "string for strings, double for numbers, bool for true/false, null for null. "
+        "String values must have escape sequences decoded: \\\\n→newline, \\\\t→tab, "
+        "\\\\\\\\→backslash, \\\\\"→quote, \\\\/→slash. "
+        "Throws FormatException for invalid JSON."
+    ),
+    expected_class="JsonParser",
+    methods=["static object Parse(string json)"],
+    tests=[
+        ("simple_object", textwrap.dedent("""\
+            using System.Collections.Generic;
+            public class Program {
+                static void Main() {
+                    var obj = (Dictionary<string, object>)JsonParser.Parse("{\\\"name\\\":\\\"Alice\\\",\\\"age\\\":30}");
+                    if ((string)obj["name"] != "Alice") throw new System.Exception("name");
+                    if ((double)obj["age"] != 30.0) throw new System.Exception("age");
+                }
+            }
+        """)),
+        ("array", textwrap.dedent("""\
+            using System.Collections.Generic;
+            public class Program {
+                static void Main() {
+                    var arr = (List<object>)JsonParser.Parse("[1, 2, 3]");
+                    if (arr.Count != 3) throw new System.Exception("count");
+                    if ((double)arr[0] != 1.0) throw new System.Exception("first");
+                    if ((double)arr[2] != 3.0) throw new System.Exception("third");
+                }
+            }
+        """)),
+        ("nested", textwrap.dedent("""\
+            using System.Collections.Generic;
+            public class Program {
+                static void Main() {
+                    var obj = (Dictionary<string, object>)JsonParser.Parse("{\\\"items\\\":[1,2],\\\"meta\\\":{\\\"ok\\\":true}}");
+                    var items = (List<object>)obj["items"];
+                    if (items.Count != 2) throw new System.Exception("items count");
+                    var meta = (Dictionary<string, object>)obj["meta"];
+                    if ((bool)meta["ok"] != true) throw new System.Exception("meta.ok");
+                }
+            }
+        """)),
+        ("string_escapes", textwrap.dedent("""\
+            using System.Collections.Generic;
+            public class Program {
+                static void Main() {
+                    var obj = (Dictionary<string, object>)JsonParser.Parse("{\\\"msg\\\":\\\"hello\\\\nworld\\\"}");
+                    string val = (string)obj["msg"];
+                    if (val != "hello\\nworld") throw new System.Exception("escape: [" + val + "]");
+                }
+            }
+        """)),
+        ("keywords", textwrap.dedent("""\
+            using System.Collections.Generic;
+            public class Program {
+                static void Main() {
+                    var arr = (List<object>)JsonParser.Parse("[true, false, null]");
+                    if ((bool)arr[0] != true) throw new System.Exception("true");
+                    if ((bool)arr[1] != false) throw new System.Exception("false");
+                    if (arr[2] != null) throw new System.Exception("null");
+                }
+            }
+        """)),
+        ("whitespace", textwrap.dedent("""\
+            using System.Collections.Generic;
+            public class Program {
+                static void Main() {
+                    var obj = (Dictionary<string, object>)JsonParser.Parse("  { \\\"a\\\" : 1 }  ");
+                    if ((double)obj["a"] != 1.0) throw new System.Exception("whitespace");
+                }
+            }
+        """)),
+        ("empty_structures", textwrap.dedent("""\
+            using System.Collections.Generic;
+            public class Program {
+                static void Main() {
+                    var obj = (Dictionary<string, object>)JsonParser.Parse("{}");
+                    if (obj.Count != 0) throw new System.Exception("empty obj");
+                    var arr = (List<object>)JsonParser.Parse("[]");
+                    if (arr.Count != 0) throw new System.Exception("empty arr");
+                }
+            }
+        """)),
+        ("negative_float", textwrap.dedent("""\
+            using System.Collections.Generic;
+            public class Program {
+                static void Main() {
+                    var arr = (List<object>)JsonParser.Parse("[-3.14, 0.5, 100]");
+                    if (System.Math.Abs((double)arr[0] - (-3.14)) > 0.001) throw new System.Exception("neg float");
+                }
+            }
+        """)),
+        ("invalid", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    try { JsonParser.Parse("{invalid}"); throw new System.Exception("should throw"); }
+                    catch (System.FormatException) { }
+                }
+            }
+        """)),
+    ],
+    base_difficulty=70,
+    spec_clarity=85,
+)
+
+# ---------------------------------------------------------------------------
+TASKS["csharp-thread-pool"] = TournamentTask(
+    id="csharp-thread-pool",
+    name="SimpleThreadPool",
+    lang="csharp",
+    description=(
+        "A simple thread pool (not using System.Threading.Tasks or ThreadPool). "
+        "SimpleThreadPool with constructor SimpleThreadPool(int size). "
+        "Methods: void Start() — starts worker threads. "
+        "long Submit(Func<object> task) — submits task, returns monotonically "
+        "increasing job ID starting from 1. "
+        "object GetResult(long id) — blocks until job completes, returns result. "
+        "Throws Exception wrapping the original if the job failed. "
+        "void Shutdown() — waits for all submitted jobs, then stops threads. "
+        "After shutdown, Submit throws InvalidOperationException. "
+        "Must not use Task, Task.Run, ThreadPool.QueueUserWorkItem, or Parallel."
+    ),
+    expected_class="SimpleThreadPool",
+    methods=[
+        "SimpleThreadPool(int size)",
+        "void Start()",
+        "long Submit(Func<object> task)",
+        "object GetResult(long id)",
+        "void Shutdown()",
+    ],
+    tests=[
+        ("basic_submit", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var pool = new SimpleThreadPool(2);
+                    pool.Start();
+                    long id = pool.Submit(() => (object)42);
+                    object result = pool.GetResult(id);
+                    if (!result.Equals(42)) throw new System.Exception("expected 42, got " + result);
+                    pool.Shutdown();
+                }
+            }
+        """)),
+        ("multiple_jobs", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var pool = new SimpleThreadPool(3);
+                    pool.Start();
+                    long[] ids = new long[10];
+                    for (int i = 0; i < 10; i++) {
+                        int n = i;
+                        ids[i] = pool.Submit(() => (object)(n * 2));
+                    }
+                    for (int i = 0; i < 10; i++) {
+                        object r = pool.GetResult(ids[i]);
+                        if (!r.Equals(i * 2)) throw new System.Exception("job " + ids[i] + " expected " + (i*2) + " got " + r);
+                    }
+                    pool.Shutdown();
+                }
+            }
+        """)),
+        ("error_handling", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var pool = new SimpleThreadPool(1);
+                    pool.Start();
+                    long id = pool.Submit(() => { throw new System.Exception("boom"); return null; });
+                    try {
+                        pool.GetResult(id);
+                        throw new System.Exception("should have thrown");
+                    } catch (System.Exception e) {
+                        if (!e.Message.Contains("boom") && (e.InnerException == null || !e.InnerException.Message.Contains("boom")))
+                            throw new System.Exception("expected boom in error");
+                    }
+                    pool.Shutdown();
+                }
+            }
+        """)),
+        ("monotonic_ids", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var pool = new SimpleThreadPool(1);
+                    pool.Start();
+                    long id1 = pool.Submit(() => (object)1);
+                    long id2 = pool.Submit(() => (object)2);
+                    long id3 = pool.Submit(() => (object)3);
+                    if (id2 <= id1 || id3 <= id2) throw new System.Exception("not monotonic");
+                    pool.GetResult(id1); pool.GetResult(id2); pool.GetResult(id3);
+                    pool.Shutdown();
+                }
+            }
+        """)),
+        ("shutdown_completes", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var pool = new SimpleThreadPool(1);
+                    pool.Start();
+                    long id = pool.Submit(() => {
+                        System.Threading.Thread.Sleep(50);
+                        return (object)"done";
+                    });
+                    pool.Shutdown();
+                    if (!pool.GetResult(id).Equals("done")) throw new System.Exception("pending job should complete");
+                }
+            }
+        """)),
+        ("shutdown_rejects", textwrap.dedent("""\
+            public class Program {
+                static void Main() {
+                    var pool = new SimpleThreadPool(1);
+                    pool.Start();
+                    pool.Shutdown();
+                    try { pool.Submit(() => null); throw new System.Exception("should throw"); }
+                    catch (System.InvalidOperationException) { }
+                }
+            }
+        """)),
+    ],
+    base_difficulty=80,
+    spec_clarity=85,
+)
+
+
 @dataclass
 class Contender:
     """A warrior entering the tournament."""
@@ -6855,6 +9363,56 @@ def build_contenders() -> list[Contender]:
             params_b=30.0, quant="q4_k_m", context_k=128,
             is_local=True, is_gpu=False, power_w=100,
             club="🧠", roles=["map", "fill", "oneshot"],
+        ),
+        # ── Cloud – architecture comparison (MoE vs dense, same family) ──
+        Contender(
+            name="gemma4-26b-a4b-cloud",
+            kind="openrouter",
+            model_id="google/gemma-4-26b-a4b-it",
+            endpoint="https://openrouter.ai/api/v1",
+            cost_input=0.08, cost_output=0.35,
+            params_b=26.0, active_params_b=4.0,
+            is_moe=True, quant="bf16", context_k=256,
+            club="🔥", roles=["map", "fill", "oneshot"],
+        ),
+        Contender(
+            name="gemma4-31b-dense",
+            kind="openrouter",
+            model_id="google/gemma-4-31b-it",
+            endpoint="https://openrouter.ai/api/v1",
+            cost_input=0.13, cost_output=0.38,
+            params_b=31.0, quant="bf16", context_k=256,
+            club="🔥", roles=["map", "fill", "oneshot"],
+        ),
+        # ── Cloud paid – quant comparison targets ──
+        Contender(
+            name="qwen3-coder:30b-cloud",
+            kind="openrouter",
+            model_id="qwen/qwen3-coder",
+            endpoint="https://openrouter.ai/api/v1",
+            cost_input=0.22, cost_output=1.00,
+            params_b=30.0, active_params_b=3.0,
+            is_moe=True, quant="bf16", context_k=256,
+            club="🧠", roles=["map", "fill", "oneshot"],
+        ),
+        Contender(
+            name="qwen3-coder:30b-instruct",
+            kind="openrouter",
+            model_id="qwen/qwen3-coder-30b-a3b-instruct",
+            endpoint="https://openrouter.ai/api/v1",
+            cost_input=0.07, cost_output=0.27,
+            params_b=30.0, active_params_b=3.0,
+            is_moe=True, quant="bf16", context_k=160,
+            club="🧠", roles=["map", "fill", "oneshot"],
+        ),
+        Contender(
+            name="llama-3.3-70b",
+            kind="openrouter",
+            model_id="meta-llama/llama-3.3-70b-instruct",
+            endpoint="https://openrouter.ai/api/v1",
+            cost_input=0.10, cost_output=0.32,
+            params_b=70.0, quant="bf16", context_k=128,
+            club="🦙", roles=["map", "fill", "oneshot"],
         ),
         # ── Cloud paid ──
         Contender(
@@ -7108,19 +9666,37 @@ def call_model(
 def extract_code(response: str) -> str:
     """Extract code from LLM response, strip fences and thinking blocks."""
     text = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-    # Closed fence: ```python ... ``` or ```rust ... ```
-    for lang in ("python", "rust", ""):
+    # Closed fence: ```python ... ``` or ```typescript ... ``` etc.
+    for lang in ("python", "rust", "typescript", "ts", "tsx", "javascript", "js", "jsx", "go", "golang", "java", "csharp", "cs", "c#", ""):
         pat = f"```{lang}\\s*\\n(.*?)```" if lang else "```\\s*\\n(.*?)```"
         m = re.search(pat, text, re.DOTALL)
         if m:
             return m.group(1).strip()
     # Unclosed fence (truncated response)
-    for lang in ("python", "rust", ""):
+    for lang in ("python", "rust", "typescript", "ts", "tsx", "javascript", "js", "jsx", "go", "golang", "java", "csharp", "cs", "c#", ""):
         pat = f"```{lang}\\s*\\n(.*)" if lang else "```\\s*\\n(.*)"
         m = re.search(pat, text, re.DOTALL)
         if m:
             return m.group(1).strip()
     return text.strip()
+
+
+def _strip_react_imports(code: str) -> str:
+    """Remove React/JSX imports that conflict with the test preamble."""
+    lines = code.split("\n")
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip import lines that pull in React or JSX libraries
+        if stripped.startswith("import") and any(
+            tok in stripped for tok in ("'react'", '"react"', "'preact'", '"preact"')
+        ):
+            continue
+        # Skip standalone VNode type redefinitions
+        if stripped.startswith("type VNode") and "=" in stripped:
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7131,10 +9707,15 @@ def score_map(code: str, task: TournamentTask) -> dict[str, bool]:
     """Score a map (skeleton) output against the structural rubric."""
     ok_syntax, _ = task.runner.check_syntax(code)
     stub = _lang_stub(task.lang)
+    is_component = _is_component_task(task)
     return {
         "syntax":      ok_syntax,
         "has_class":   task.expected_class in code,
-        "has_init":    "__init__" in code or "new(" in code or "fn new" in code,
+        "has_init":    (
+            f"function {task.expected_class}" in code or f"{task.expected_class}(" in code
+            if is_component else
+            "__init__" in code or "new(" in code or "fn new" in code or "constructor" in code
+        ),
         "has_methods": all(
             m.split("(")[0].split(".")[-1].split("::")[-1].strip() in code
             for m in task.methods
@@ -7226,22 +9807,73 @@ class FightResult:
 # PROMPTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _is_component_task(task: TournamentTask) -> bool:
+    """True for TSX function component tasks (not instantiated with new)."""
+    if not task.id.startswith("tsx-"):
+        return False
+    # If any test uses `new ClassName`, it's a class, not a function component
+    return not any(
+        f"new {task.expected_class}" in code
+        for _, code in task.tests
+    )
+
+
 def _lang_label(lang: str) -> str:
     return {"python": "Python", "rust": "Rust"}.get(lang, lang.title())
 
 
 def _lang_stub(lang: str) -> str:
     """Placeholder body for skeleton methods."""
-    return {"python": "pass", "rust": "todo!()"}.get(lang, "pass")
+    return {"python": "pass", "rust": "todo!()", "typescript": "throw new Error('stub')"}.get(lang, "pass")
 
 
 def _lang_fence(lang: str) -> str:
     return {"python": "python", "rust": "rust"}.get(lang, lang)
 
 
+_TSX_PREAMBLE_HINT = textwrap.dedent("""\
+    The test harness already provides these — do NOT redefine or import them:
+      type VNode = { type: string | Function; props: Record<string, any>; children: any[] };
+      function createElement(type, props, ...children): VNode;
+      const React = { createElement };
+    Do NOT import React or any JSX library — it is already provided.
+    Use JSX syntax (<div>, <button>, etc.) — it compiles to React.createElement calls.
+    VNode.children is an array of child elements/strings, NOT a prop.
+""")
+
+
 def _map_messages(task: TournamentTask) -> list[dict]:
     lang = _lang_label(task.lang)
     stub = _lang_stub(task.lang)
+    is_component = _is_component_task(task)
+
+    is_tsx = task.id.startswith("tsx-")
+    tsx_hint = f"\n            - {_TSX_PREAMBLE_HINT}" if is_tsx else ""
+
+    if is_component:
+        return [
+            {"role": "system", "content":
+             f"You are a senior {lang} developer.  "
+             f"Output ONLY a {lang}/TSX skeleton — type interfaces and "
+             f"function signatures with `{stub}` bodies.  NO implementation logic."},
+            {"role": "user", "content": textwrap.dedent(f"""\
+                Design a {lang} TSX component skeleton:
+
+                Component: {task.expected_class}
+                {task.description}
+
+                Required signatures:
+                {task.method_signatures}
+
+                Rules:
+                - Define a Props interface for the component
+                - Use a function component (NOT a class component)
+                - The function body must be `{stub}` only
+                - Include type annotations on all parameters and return types{tsx_hint}
+                - Output ONLY the {lang}/TSX code (no imports for React)
+            """)},
+        ]
+
     return [
         {"role": "system", "content":
          f"You are a senior software architect.  "
@@ -7260,16 +9892,20 @@ def _map_messages(task: TournamentTask) -> list[dict]:
             - Include necessary stdlib imports/use statements
             - Every method body must be `{stub}` only
             - Include type annotations on all parameters and return types
-            - Include a brief doc comment per method
+            - Include a brief doc comment per method{tsx_hint}
             - Output ONLY the {lang} code
         """)},
     ]
 
 
-def _fill_messages(skeleton: str, lang: str = "python") -> list[dict]:
+def _fill_messages(skeleton: str, lang: str = "python", *, is_tsx: bool = False, description: str = "") -> list[dict]:
     label = _lang_label(lang)
     stub = _lang_stub(lang)
     fence = _lang_fence(lang)
+    tsx_note = (
+        f"\n\nNote: {_TSX_PREAMBLE_HINT}" if is_tsx else ""
+    )
+    desc_note = f"\n\nBehaviour spec: {description}" if description else ""
     return [
         {"role": "system", "content":
          f"You are a senior {label} developer.  "
@@ -7277,21 +9913,27 @@ def _fill_messages(skeleton: str, lang: str = "python") -> list[dict]:
          f"working code.  Do NOT change signatures or add methods."},
         {"role": "user", "content":
          f"Complete this implementation.  Output ONLY the {label} code.\n\n"
-         f"```{fence}\n{skeleton}\n```"},
+         f"```{fence}\n{skeleton}\n```{desc_note}{tsx_note}"},
     ]
 
 
 def _oneshot_messages(task: TournamentTask) -> list[dict]:
     lang = _lang_label(task.lang)
     stub = _lang_stub(task.lang)
+    is_tsx = task.id.startswith("tsx-")
+    is_component = _is_component_task(task)
+
+    kind = "component function" if is_component else "struct/class"
+    tsx_rules = f"\n    - {_TSX_PREAMBLE_HINT}" if is_tsx else ""
+
     return [
         {"role": "system", "content":
          f"You are a senior {lang} developer.  "
-         f"Write a complete, fully-implemented {lang} struct/class."},
+         f"Write a complete, fully-implemented {lang} {kind}."},
         {"role": "user", "content": textwrap.dedent(f"""\
             Write a complete {lang} implementation:
 
-            Struct/Class: {task.expected_class}
+            {'Component' if is_component else 'Struct/Class'}: {task.expected_class}
             {task.description}
 
             Required methods:
@@ -7300,7 +9942,7 @@ def _oneshot_messages(task: TournamentTask) -> list[dict]:
             Rules:
             - All methods must be fully implemented (no {stub}, no TODO)
             - Include necessary stdlib imports/use statements
-            - No external dependencies
+            - No external dependencies{tsx_rules}
             - Output ONLY the {lang} code
         """)},
     ]
@@ -7328,6 +9970,8 @@ def fight_tiered(
         return result
 
     skeleton = extract_code(map_res.content)
+    if task.id.startswith("tsx-"):
+        skeleton = _strip_react_imports(skeleton)
     result.map_code = skeleton
     result.map_checks = score_map(skeleton, task)
     result.tokens_in += map_res.tokens_in
@@ -7342,11 +9986,17 @@ def fight_tiered(
         return result
 
     # Phase 2 — Fill
-    fill_res = call_model(fill_c, _fill_messages(skeleton, task.lang), max_tokens=2500)
+    fill_res = call_model(fill_c, _fill_messages(
+        skeleton, task.lang,
+        is_tsx=task.id.startswith("tsx-"),
+        description=task.description,
+    ), max_tokens=2500)
     if fill_res.error:
         return result
 
     code = extract_code(fill_res.content)
+    if task.id.startswith("tsx-"):
+        code = _strip_react_imports(code)
     result.fill_code = code
     result.final_code = code
     result.tokens_in += fill_res.tokens_in
@@ -7400,6 +10050,8 @@ def fight_oneshot(contender: Contender, task: TournamentTask,
         return result
 
     code = extract_code(res.content)
+    if task.id.startswith("tsx-"):
+        code = _strip_react_imports(code)
     result.final_code = code
     result.tokens_in = res.tokens_in
     result.tokens_out = res.tokens_out
@@ -7631,6 +10283,16 @@ def anthropic_projection(results: list[FightResult]) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    # Load .env (for OPENROUTER_API_KEY etc.) if present
+    _env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.isfile(_env_path):
+        with open(_env_path) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if "=" in _line and not _line.startswith("#"):
+                    _k, _v = _line.split("=", 1)
+                    os.environ.setdefault(_k.strip(), _v.strip())
+
     parser = argparse.ArgumentParser(
         description="🏔️ Caveman Model Tournament — models fight with clubs",
     )
@@ -7641,6 +10303,10 @@ def main():
     parser.add_argument(
         "--task", choices=list(TASKS),
         help="Run single task (default: all)",
+    )
+    parser.add_argument(
+        "--lang", choices=sorted({t.lang for t in TASKS.values()}),
+        help="Filter tasks by language (e.g. typescript, python, rust)",
     )
     parser.add_argument(
         "--quick", action="store_true",
@@ -7657,6 +10323,10 @@ def main():
     parser.add_argument(
         "--map", action="store_true",
         help="Show efficiency maps (turbo compressor–style) for each contender",
+    )
+    parser.add_argument(
+        "--cloud", action="store_true",
+        help="Skip local models, only use cloud contenders",
     )
     args = parser.parse_args()
 
@@ -7679,13 +10349,21 @@ def main():
 
     # Health check
     print("\n📡  Checking endpoints...")
-    contenders = check_endpoints(build_contenders())
+    all_contenders = build_contenders()
+    if args.cloud:
+        all_contenders = [c for c in all_contenders if not c.is_local]
+    contenders = check_endpoints(all_contenders)
     print(f"   {len(contenders)} warriors ready\n")
     for c in contenders:
         print(f"   {c.club} {c.name:<25} {c.tag()}")
 
     # Select tasks
-    tasks = [TASKS[args.task]] if args.task else list(TASKS.values())
+    if args.task:
+        tasks = [TASKS[args.task]]
+    elif args.lang:
+        tasks = [t for t in TASKS.values() if t.lang == args.lang]
+    else:
+        tasks = list(TASKS.values())
 
     all_scored: list[tuple[FightResult, float]] = []
     all_results: list[FightResult] = []

@@ -190,17 +190,28 @@ def _compress_for_model(text: str, mode: str) -> str:
     for a paired encode/decode pipeline and produce unreadable output when
     sent to a model without the decoder context.
     """
-    from codeclub.compress.tree import stub_functions
+    from codeclub.compress.tree import stub_functions, _detect_language
     from codeclub.compress.compact import compact
 
-    _code_signals = ("def ", "class ", "import ", "return ", "async def ")
-    is_code = any(s in text for s in _code_signals)
+    _py_signals = ("def ", "class ", "import ", "return ", "async def ")
+    _js_signals = ("function ", "const ", "let ", "var ", "export ", "=> {", "=> (")
+    is_python = any(s in text for s in _py_signals)
+    is_js = any(s in text for s in _js_signals)
 
-    if mode == "prose" or (mode == "auto" and not is_code):
+    if mode == "prose" or (mode == "auto" and not is_python and not is_js):
         return text  # prose compression not yet implemented; no-op
 
+    # Detect language from content signals
+    language = "python"
+    if is_js and not is_python:
+        language = "javascript"
+    elif is_js and is_python:
+        # Ambiguous — JS arrow functions / const are a strong signal
+        if "=>" in text or "require(" in text:
+            language = "javascript"
+
     # mode == "code" or auto-detected as code
-    stubbed, _ = stub_functions(text)
+    stubbed, _ = stub_functions(text, language=language)
     return compact(stubbed, strip_sections=True, collapse_sigs=True)
 
 

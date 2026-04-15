@@ -24,7 +24,7 @@ class StripeWalletProvider(WalletProvider):
     """Stripe wallet adapter.
 
     Stripe transfers in this adapter are intentionally platform-funded:
-    ``source`` is preserved for ReviewPay bookkeeping, but Stripe only moves
+    ``source`` is preserved for Acme bookkeeping, but Stripe only moves
     funds from the platform balance to ``destination``. User withdrawals use
     :meth:`create_payout`, which executes against the connected account itself.
     """
@@ -305,10 +305,10 @@ class StripeWalletProvider(WalletProvider):
             reversal_meta = {
                 **payout_meta,
                 "flow": "customer_withdrawal_platform_fee",
-                "reviewpay_transaction_type": "wallet_payout_fee_reversal",
-                "reviewpay_platform_fee_wallet_id": wallet_id,
-                "reviewpay_platform_fee_source_transfer_id": transfer_id,
-                "reviewpay_platform_fee_pending_transfer_id": pending.id,
+                "platform_transaction_type": "wallet_payout_fee_reversal",
+                "platform_platform_fee_wallet_id": wallet_id,
+                "platform_platform_fee_source_transfer_id": transfer_id,
+                "platform_platform_fee_pending_transfer_id": pending.id,
             }
             reversal_idempotency_key = self._stripe_idempotency_key(
                 base_idempotency_key,
@@ -317,7 +317,7 @@ class StripeWalletProvider(WalletProvider):
             )
             reversal_params: dict[str, Any] = {
                 "amount": reversal_amount,
-                "description": payout_meta.get("reviewpay_platform_fee_description") or "ReviewPay payout fee",
+                "description": payout_meta.get("platform_platform_fee_description") or "Acme payout fee",
                 "metadata": reversal_meta,
                 **self._request_options(),
             }
@@ -341,7 +341,7 @@ class StripeWalletProvider(WalletProvider):
 
         if remaining_fee > 0:
             raise WalletProviderError(
-                "Unable to collect the ReviewPay fee from prior Stripe wallet funding transfers",
+                "Unable to collect the Acme fee from prior Stripe wallet funding transfers",
                 payload={
                     "wallet_id": wallet_id,
                     "currency": currency.upper(),
@@ -370,9 +370,9 @@ class StripeWalletProvider(WalletProvider):
             restore_meta = {
                 **payout_meta,
                 "flow": "customer_withdrawal_platform_fee_restore",
-                "reviewpay_transaction_type": "wallet_payout_fee_restore",
-                "reviewpay_platform_fee_reversal_id": reversal_id,
-                "reviewpay_platform_fee_wallet_id": wallet_id,
+                "platform_transaction_type": "wallet_payout_fee_restore",
+                "platform_platform_fee_reversal_id": reversal_id,
+                "platform_platform_fee_wallet_id": wallet_id,
             }
             restore_idempotency_key = self._stripe_idempotency_key(
                 base_idempotency_key,
@@ -383,7 +383,7 @@ class StripeWalletProvider(WalletProvider):
                 "amount": reversal_amount,
                 "currency": currency.lower(),
                 "destination": wallet_id,
-                "description": "Restore ReviewPay payout fee after payout failure",
+                "description": "Restore Acme payout fee after payout failure",
                 "metadata": restore_meta,
                 **self._request_options(),
             }
@@ -414,8 +414,8 @@ class StripeWalletProvider(WalletProvider):
         description: str = "",
     ) -> dict[str, Any]:
         payout_meta = dict(meta_data or {})
-        if description and "reviewpay_platform_fee_description" not in payout_meta:
-            payout_meta["reviewpay_platform_fee_description"] = description
+        if description and "platform_platform_fee_description" not in payout_meta:
+            payout_meta["platform_platform_fee_description"] = description
         base_idempotency_key = self._stripe_idempotency_key(
             payout_meta.get("idempotency_key"),
             reference,
@@ -447,8 +447,8 @@ class StripeWalletProvider(WalletProvider):
         collected_fee: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payout_meta = dict(meta_data or {})
-        if description and "reviewpay_platform_fee_description" not in payout_meta:
-            payout_meta["reviewpay_platform_fee_description"] = description
+        if description and "platform_platform_fee_description" not in payout_meta:
+            payout_meta["platform_platform_fee_description"] = description
         base_idempotency_key = self._stripe_idempotency_key(
             payout_meta.get("idempotency_key"),
             reference,
@@ -480,8 +480,8 @@ class StripeWalletProvider(WalletProvider):
                 business_name=name,
                 business_type="individual",
                 metadata={
-                    "reviewpay_user_id": str(user_id),
-                    "reviewpay_role": "user",
+                    "platform_user_id": str(user_id),
+                    "platform_role": "user",
                 },
             )
         except (StripeServiceError, stripe.error.StripeError) as exc:
@@ -658,7 +658,7 @@ class StripeWalletProvider(WalletProvider):
             payout_meta.get("reference"),
             payout_meta.get("provider_txn_id"),
         )
-        fee_amount = int(payout_meta.get("reviewpay_platform_fee_amount_cents") or 0)
+        fee_amount = int(payout_meta.get("platform_platform_fee_amount_cents") or 0)
         payout_amount = amount - fee_amount
         if fee_amount < 0 or payout_amount <= 0:
             raise WalletProviderError(
@@ -679,7 +679,7 @@ class StripeWalletProvider(WalletProvider):
                 payout_meta=payout_meta,
                 base_idempotency_key=base_idempotency_key,
             )
-            payout_meta["reviewpay_platform_fee_reversals"] = fee_reversals
+            payout_meta["platform_platform_fee_reversals"] = fee_reversals
 
         payout_idempotency_key = self._stripe_idempotency_key(base_idempotency_key, "payout")
         payout_params: dict[str, Any] = {
@@ -820,7 +820,7 @@ class StripeWalletProvider(WalletProvider):
             except Exception as exc:
                 db.rollback()
                 raise WalletProviderError(
-                    "Stripe transfer succeeded but ReviewPay could not persist the result; retry the commit safely with the same pending transfer",
+                    "Stripe transfer succeeded but Acme could not persist the result; retry the commit safely with the same pending transfer",
                     payload={
                         "pending_transfer_id": pending.id,
                         "stripe_transfer_id": transfer_id or None,
@@ -905,8 +905,8 @@ class StripeWalletProvider(WalletProvider):
             "wallet-transfer",
             reference,
             transfer_meta.get("provider_txn_id"),
-            transfer_meta.get("reviewpay_review_id"),
-            transfer_meta.get("reviewpay_referral_payment_id"),
+            transfer_meta.get("platform_review_id"),
+            transfer_meta.get("platform_referral_payment_id"),
         )
         if transfer_idempotency_key:
             transfer_meta["stripe_transfer_idempotency_key"] = transfer_idempotency_key

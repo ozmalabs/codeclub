@@ -26,7 +26,7 @@ from typing import Literal, NamedTuple
 # Language detection
 # ---------------------------------------------------------------------------
 
-Language = Literal["python", "javascript", "typescript"]
+Language = Literal["python", "javascript", "typescript", "csharp"]
 
 
 def _detect_language(filename: str) -> Language:
@@ -36,6 +36,8 @@ def _detect_language(filename: str) -> Language:
         return "javascript"
     if ext in ("ts", "tsx", "mts", "cts"):
         return "typescript"
+    if ext == "cs":
+        return "csharp"
     return "python"
 
 
@@ -47,6 +49,8 @@ def _get_ts_parser(language: Language):
     elif language in ("javascript", "typescript"):
         # tree-sitter-javascript handles JSX; use it for TS too (good enough for stub extraction)
         import tree_sitter_javascript as tslang
+    elif language == "csharp":
+        import tree_sitter_c_sharp as tslang
     else:
         import tree_sitter_python as tslang
     lang = TSLanguage(tslang.language())
@@ -97,6 +101,7 @@ def stub_functions(
     code: str,
     language: Language = "python",
     *,
+    filename: str | None = None,
     keep_docstrings: bool = True,
     max_doc_len: int = 120,
 ) -> tuple[str, SourceMap]:
@@ -111,6 +116,8 @@ def stub_functions(
     The source_map records orig→compressed line mappings for each stub so
     expander.expand() can reconstruct the original file after LLM edits.
     """
+    if filename is not None:
+        language = _detect_language(filename)
     source_map = SourceMap(language=language, original_code=code)
 
     try:
@@ -133,6 +140,8 @@ def stub_functions(
 
     if language == "python":
         stubs_to_apply = _collect_python_stubs(tree.root_node, lines)
+    elif language == "csharp":
+        stubs_to_apply = _collect_csharp_stubs(tree.root_node, code)
     else:
         stubs_to_apply = _collect_js_stubs(tree.root_node, code)
 
@@ -289,6 +298,7 @@ def _walk_js(node, code: str, lines: list[str], results: list, seen_ranges: set)
 
     elif node.type in ("lexical_declaration", "variable_declaration"):
         # const foo = (...) => { ... }  or  const foo = function() { ... }
+        # const Comp = (...) => (...)    (JSX components)
         for decl in node.children:
             if decl.type == "variable_declarator":
                 name_node = None
@@ -300,7 +310,7 @@ def _walk_js(node, code: str, lines: list[str], results: list, seen_ranges: set)
                         arrow_fn = child
                 if name_node and arrow_fn:
                     name = name_node.text.decode("utf-8")
-                    body = _js_body_node(arrow_fn, "statement_block")
+                    body = _js_arrow_body(arrow_fn)
                     if body and arrow_fn.end_point[0] > arrow_fn.start_point[0]:
                         # Use the outer declaration range for the full span
                         key = (node.start_point[0], node.end_point[0])
@@ -325,6 +335,76 @@ def _js_body_node(node, body_type: str):
         if child.type == body_type:
             return child
     return None
+
+
+def _js_arrow_body(node):
+    """Find the body of an arrow function — statement_block or parenthesized_expression."""
+    for child in node.children:
+        if child.type in ("statement_block", "parenthesized_expression"):
+            return child
+    return None
+
+
+# ---------------------------------------------------------------------------
+# C# AST walking
+# ---------------------------------------------------------------------------
+
+def _collect_csharp_stubs(root_node, code: str) -> list[tuple[int, int, int, str]]:
+    """Walk tree-sitter C# AST for method/constructor/property nodes."""
+    results: list[tuple[int, int, int, str]] = []
+    lines = code.splitlines(keepends=True)
+    _walk_csharp(root_node, lines, results, set())
+    return results
+
+
+def _walk_csharp(node, lines: list[str], results: list, seen_ranges: set):
+    """Recursively collect stubbable nodes from a C# tree."""
+    if node.type in ("method_declaration", "constructor_declaration",
+                      "operator_declaration", "conversion_operator_declaration"):
+        name = "<anonymous>"
+        for child in node.children:
+            if child.type == "identifier":
+                name = child.text.decode("utf-8")
+                break
+        body = None
+        for child in node.children:
+            if child.type == "block":
+                body = child
+                break
+        if body and node.end_point[0] > node.start_point[0]:
+            key = (node.start_point[0], node.end_point[0])
+            if key not in seen_ranges:
+                seen_ranges.add(key)
+                results.append((node.start_point[0], node.end_point[0],
+                               body.start_point[0], name))
+                return  # don't recurse into body
+
+    # Property accessors (get/set bodies)
+    if node.type == "property_declaration":
+        name = "<property>"
+        for child in node.children:
+            if child.type == "identifier":
+                name = child.text.decode("utf-8")
+                break
+        # Find accessor_list which contains get/set blocks
+        for child in node.children:
+            if child.type == "accessor_list":
+                for acc in child.children:
+                    if acc.type == "accessor_declaration":
+                        body = None
+                        for c in acc.children:
+                            if c.type == "block":
+                                body = c
+                                break
+                        if body and acc.end_point[0] > acc.start_point[0]:
+                            key = (acc.start_point[0], acc.end_point[0])
+                            if key not in seen_ranges:
+                                seen_ranges.add(key)
+                                results.append((acc.start_point[0], acc.end_point[0],
+                                               body.start_point[0], name))
+
+    for child in node.children:
+        _walk_csharp(child, lines, results, seen_ranges)
 
 
 def _extract_python_docstring(lines: list[str], body_start: int, fn_start: int, max_len: int) -> str:

@@ -511,8 +511,9 @@ def _read_and_stub_files(
     """
     Read files and stub them (remove function bodies, keep signatures).
     Files in *full_bodies* are returned without stubbing.
-    Uses codeclub.compress.tree.stub_functions for Python files.
+    Uses codeclub.compress.tree.stub_functions for supported languages.
     """
+    _STUBBABLE_EXTS = (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts")
     full_set = set(full_bodies) if full_bodies else set()
     stub_fn = _get_stub_functions()
     parts: list[str] = []
@@ -522,10 +523,11 @@ def _read_and_stub_files(
         if content is None:
             continue
 
-        if fpath in full_set or stub_fn is None or not fpath.endswith(".py"):
+        can_stub = any(fpath.endswith(ext) for ext in _STUBBABLE_EXTS)
+        if fpath in full_set or stub_fn is None or not can_stub:
             parts.append(f"# {fpath}\n{content}")
         else:
-            stubbed, _smap = stub_fn(content)
+            stubbed, _smap = stub_fn(content, filename=fpath)
             parts.append(f"# {fpath}\n{stubbed}")
 
     return "\n\n".join(parts)
