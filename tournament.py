@@ -223,16 +223,18 @@ class SmashRange:
     # Clarity axis
     min_clarity: int  # minimum task clarity the model needs to succeed
 
-    def fit(self, coord: SmashCoord) -> float:
+    def fit(self, coord: SmashCoord, lang: str | None = None,
+            lang_proficiency: dict[str, float] | None = None) -> float:
         """
         How well-fitted is this model to a task at the given coordinates?
         Returns 0.0–1.0 where 1.0 = perfectly right-sized.
 
-        Two gates multiplied:
+        Three gates multiplied:
         - Difficulty: oversized = slight penalty, undersized = steep, above high = 0
         - Clarity: sigmoid penalty centred 20 below min_clarity (sharp cliff)
+        - Language: proficiency multiplier (1.0 = native, 0.0 = can't do it)
 
-        Calibrated against 141 real benchmark fights.
+        Calibrated against 232 real benchmark fights.
         """
         difficulty, clarity = coord.difficulty, coord.clarity
 
@@ -253,11 +255,18 @@ class SmashRange:
         cliff = self.min_clarity - 20
         clar_fit = 1 / (1 + math.exp(-0.25 * (clarity - cliff)))
 
-        return diff_fit * clar_fit
+        # Language proficiency multiplier
+        lang_fit = 1.0
+        if lang and lang_proficiency:
+            lang_fit = lang_proficiency.get(lang, lang_proficiency.get("default", 0.7))
 
-    def covers(self, coord: SmashCoord, threshold: float = 0.5) -> bool:
+        return diff_fit * clar_fit * lang_fit
+
+    def covers(self, coord: SmashCoord, threshold: float = 0.5,
+               lang: str | None = None,
+               lang_proficiency: dict[str, float] | None = None) -> bool:
         """Does this model's region cover the given task point?"""
-        return self.fit(coord) >= threshold
+        return self.fit(coord, lang=lang, lang_proficiency=lang_proficiency) >= threshold
 
 
 def estimate_smash_range(
@@ -311,6 +320,55 @@ def estimate_smash_range(
         return SmashRange(low=20, sweet=55, high=90,  min_clarity=35)
     else:
         return SmashRange(low=25, sweet=60, high=95,  min_clarity=25)
+
+
+def estimate_lang_proficiency(
+    params_b: float,
+    active_params_b: float | None = None,
+    is_moe: bool = False,
+) -> dict[str, float]:
+    """
+    Heuristic language proficiency from model size.
+
+    Larger models have better training coverage across languages.
+    Python is universally strong; Rust/JSX degrade with smaller models.
+
+    Calibrated against 232 benchmark fights (2026-04).
+    """
+    effective = active_params_b if (is_moe and active_params_b) else params_b
+
+    if effective >= 70:
+        return {"python": 1.0, "rust": 0.85, "typescript": 0.90, "jsx": 0.85, "default": 0.80}
+    elif effective >= 30:
+        return {"python": 1.0, "rust": 0.75, "typescript": 0.85, "jsx": 0.80, "default": 0.70}
+    elif effective >= 10:
+        return {"python": 1.0, "rust": 0.55, "typescript": 0.75, "jsx": 0.70, "default": 0.60}
+    elif effective >= 5:
+        return {"python": 0.95, "rust": 0.40, "typescript": 0.65, "jsx": 0.60, "default": 0.50}
+    else:
+        return {"python": 0.85, "rust": 0.20, "typescript": 0.50, "jsx": 0.45, "default": 0.40}
+
+
+# Data-driven language proficiency from 232 benchmark fights.
+# Format: {model_name: {lang: proficiency}} where proficiency = avg_quality / best_python_quality
+# Only includes models with enough data; others use estimate_lang_proficiency().
+MEASURED_LANG_PROFICIENCY: dict[str, dict[str, float]] = {
+    "gpt-5.4-mini":     {"python": 1.0, "rust": 0.89, "default": 0.85},
+    "gpt-5.4":          {"python": 1.0, "rust": 0.84, "default": 0.80},
+    "gpt-5.4-nano":     {"python": 1.0, "rust": 0.73, "default": 0.65},
+    "claude-sonnet-4.6": {"python": 1.0, "rust": 0.82, "default": 0.80},
+    "claude-haiku-4.5":  {"python": 1.0, "rust": 0.84, "default": 0.75},
+    "gemini-2.5-flash":  {"python": 1.0, "rust": 0.70, "default": 0.70},
+    "gemini-2.5-pro":    {"python": 1.0, "rust": 0.67, "default": 0.70},
+    "codestral-2508":    {"python": 1.0, "rust": 0.61, "default": 0.65},
+    "deepseek-v3.1":     {"python": 1.0, "rust": 0.61, "default": 0.70},
+    "deepseek-r1":       {"python": 0.63, "rust": 1.0, "default": 0.70},  # better at Rust!
+    "devstral-small":    {"python": 1.0, "rust": 0.0, "default": 0.40},
+    "phi-4":             {"python": 1.0, "rust": 0.0, "default": 0.40},
+    "qwen2.5-coder:1.5b": {"python": 1.0, "rust": 0.18, "default": 0.30},
+    "rnj-1:8b":          {"python": 1.0, "rust": 0.65, "default": 0.60},
+    "gemma4-26b-a4b":    {"python": 1.0, "rust": 0.50, "default": 0.55},
+}
 
 
 def estimate_token_load(coord: SmashCoord) -> int:
@@ -378,6 +436,255 @@ def compute_dollar_cost(
     tokens = estimate_token_load(coord)
     # Rough split: 40% input, 60% output
     return (tokens * 0.4 * cost_input + tokens * 0.6 * cost_output) / 1e6
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPOUND EFFICIENCY — the real third dimension
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Two separable axes:
+#   VALUE  = quality × cost_curve      (how good per dollar — speed-independent)
+#   SPEED  = time_curve with modifiers (how fast — cost-independent)
+#
+# Compound = value × speed^speed_weight
+#   speed_weight=0.0 → pure value optimisation (don't care how long)
+#   speed_weight=0.5 → balanced (default)
+#   speed_weight=1.0 → speed matters as much as value
+#
+# Hardware affects speed only — a slow machine is still efficient, just slow.
+# Cloud providers get a separate speed modifier for variable latency/throughput.
+#
+# 100 = completes with zero resources (theoretical perfect)
+# 0   = cannot complete
+
+
+@dataclass
+class HardwareProfile:
+    """A hardware target with speed and power characteristics."""
+    name: str
+    speed_modifier: float   # tok/s multiplier vs reference (consumer GPU = 1.0)
+    power_w: float = 150.0  # typical power draw in watts
+    description: str = ""
+
+
+# Reference: consumer GPU with 12GB VRAM (RTX 3060, Arc B580, etc.)
+HARDWARE_PROFILES: dict[str, HardwareProfile] = {
+    "cpu_budget":       HardwareProfile("Budget CPU",      0.15, 65,  "i5 / Ryzen 5, 32GB RAM"),
+    "cpu_workstation":  HardwareProfile("Workstation CPU",  0.35, 100, "Xeon / Threadripper, 128GB"),
+    "gpu_consumer":     HardwareProfile("Consumer GPU",     1.0,  150, "RTX 3060 / Arc B580, 12GB — REFERENCE"),
+    "gpu_midrange":     HardwareProfile("Midrange GPU",     1.5,  200, "RTX 4070 / Arc B770, 16GB"),
+    "gpu_enthusiast":   HardwareProfile("Enthusiast GPU",   2.2,  350, "RTX 4090 / RTX 5080, 24GB"),
+    "gpu_workstation":  HardwareProfile("Workstation GPU",  3.0,  300, "A6000 / L40S, 48GB"),
+    "a100":             HardwareProfile("A100",             3.5,  400, "A100 80GB SXM"),
+    "h100":             HardwareProfile("H100",             5.0,  700, "H100 80GB SXM"),
+    "cloud_api":        HardwareProfile("Cloud API",        1.0,  0,   "Provider-managed — speed is what it is"),
+}
+
+
+# Curve parameters — τ values control where the sigmoid/exponential sits.
+SPEED_TAU: float = 30.0   # seconds — 30s completion ≈ 37% speed score
+COST_TAU: float = 0.01    # USD — $0.01/task ≈ 50% cost score
+
+
+def value_efficiency(
+    quality: float,
+    cost_input: float,
+    cost_output: float,
+    coord: SmashCoord,
+    power_w: float | None = None,
+    time_s: float | None = None,
+    electricity_rate: float = 0.35,
+) -> float:
+    """
+    Value efficiency: quality per dollar. Speed-independent.
+
+    0–100 where 100 = perfect quality, zero cost (theoretical).
+    A slow model that's cheap and accurate scores high here.
+
+    Parameters
+    ----------
+    quality : 0.0–1.0, probability of correct completion
+    cost_input, cost_output : $/1M tokens (cloud pricing, 0 for local)
+    coord : task coordinate (difficulty, clarity) for token estimation
+    power_w : watts during inference (for electricity cost of local models)
+    time_s : estimated seconds (needed for electricity cost; ignored if power_w is None)
+    electricity_rate : $/kWh
+    """
+    import math
+
+    if quality < 0.01:
+        return 0.0
+
+    tokens = estimate_token_load(coord)
+
+    # API cost
+    api_cost = (tokens * 0.4 * cost_input + tokens * 0.6 * cost_output) / 1e6
+
+    # Electricity cost for local models
+    energy_cost = 0.0
+    if power_w and power_w > 0 and time_s and time_s > 0:
+        kwh = (power_w * time_s) / 3_600_000
+        energy_cost = kwh * electricity_rate
+
+    total_cost = api_cost + energy_cost
+
+    # Cost curve: 1/(1+c/τ) — cheaper is better, asymptotic to 1.0 at $0
+    cost_score = 1.0 / (1.0 + total_cost / COST_TAU)
+
+    return quality * cost_score * 100.0
+
+
+def wallclock_score(
+    tok_s: float,
+    coord: SmashCoord,
+    hw_speed_modifier: float = 1.0,
+    cloud_speed_modifier: float = 1.0,
+) -> float:
+    """
+    Wallclock speed score: how fast. Cost-independent.
+
+    0–100 where 100 = instant (theoretical).
+    Affected by hardware speed modifier AND cloud provider modifier.
+
+    Parameters
+    ----------
+    tok_s : tokens/second on reference hardware
+    coord : task coordinate for token estimation
+    hw_speed_modifier : hardware multiplier (CPU=0.15, A100=3.5)
+    cloud_speed_modifier : provider/load multiplier (1.0=normal, 0.5=congested)
+    """
+    import math
+
+    effective_tok_s = tok_s * hw_speed_modifier * cloud_speed_modifier
+    tokens = estimate_token_load(coord)
+    time_s = tokens / max(effective_tok_s, 0.1)
+
+    # Exponential decay: exp(-t/τ)
+    # 1s→97, 5s→85, 10s→72, 30s→37, 60s→14, 120s→2
+    return math.exp(-time_s / SPEED_TAU) * 100.0
+
+
+def compound_efficiency(
+    quality: float,
+    tok_s: float,
+    cost_input: float,
+    cost_output: float,
+    coord: SmashCoord,
+    hw_speed_modifier: float = 1.0,
+    cloud_speed_modifier: float = 1.0,
+    power_w: float | None = None,
+    electricity_rate: float = 0.35,
+    speed_weight: float = 0.5,
+) -> float:
+    """
+    Compound efficiency: value × speed^weight. 0–100.
+
+    Blends value efficiency (quality per dollar) with wallclock speed.
+    The speed_weight controls how much wallclock time matters:
+      0.0 = pure value (don't care how long, just be cheap and correct)
+      0.5 = balanced (default — speed matters but not as much as value)
+      1.0 = speed-critical (speed matters as much as value)
+
+    100 = completes with zero resources instantly (theoretical, unreachable)
+      0 = cannot complete
+    """
+    import math
+
+    if quality < 0.01:
+        return 0.0
+
+    tokens = estimate_token_load(coord)
+    effective_tok_s = tok_s * hw_speed_modifier * cloud_speed_modifier
+    time_s = tokens / max(effective_tok_s, 0.1)
+
+    value = value_efficiency(
+        quality, cost_input, cost_output, coord,
+        power_w=power_w, time_s=time_s,
+        electricity_rate=electricity_rate,
+    )
+    speed = wallclock_score(tok_s, coord, hw_speed_modifier, cloud_speed_modifier)
+
+    if speed_weight <= 0.0:
+        return value
+
+    # Geometric blend: value × (speed/100)^weight × 100
+    # At weight=0: compound = value
+    # At weight=1: compound = value × speed / 100
+    speed_factor = (speed / 100.0) ** speed_weight
+    return value * speed_factor
+
+
+def compound_efficiency_contender(
+    contender: "Contender",
+    coord: SmashCoord,
+    hw_speed_modifier: float = 1.0,
+    cloud_speed_modifier: float = 1.0,
+    speed_weight: float = 0.5,
+    lang: str | None = None,
+) -> float:
+    """Compound efficiency for a specific contender at a task coordinate."""
+    quality = contender.smash.fit(
+        coord,
+        lang=lang,
+        lang_proficiency=contender.lang_proficiency if lang else None,
+    )
+    return compound_efficiency(
+        quality=quality,
+        tok_s=contender.tok_s or 10.0,
+        cost_input=contender.cost_input,
+        cost_output=contender.cost_output,
+        coord=coord,
+        hw_speed_modifier=hw_speed_modifier,
+        cloud_speed_modifier=cloud_speed_modifier,
+        power_w=contender.power_w,
+        speed_weight=speed_weight,
+    )
+
+
+def compute_compound_surface(
+    smash: SmashRange,
+    tok_s: float,
+    cost_input: float,
+    cost_output: float,
+    hw_speed_modifier: float = 1.0,
+    cloud_speed_modifier: float = 1.0,
+    power_w: float | None = None,
+    speed_weight: float = 0.5,
+    d_range: tuple[int, int] = (0, 100),
+    c_range: tuple[int, int] = (0, 100),
+    resolution: int = 200,
+) -> tuple:
+    """
+    Compute a 2D compound efficiency surface across task space.
+
+    Returns (difficulties, clarities, eff_grid) where:
+    eff_grid[c_idx, d_idx] = compound efficiency 0–100.
+
+    The TRUE efficiency map — value (quality per dollar) blended with
+    wallclock speed according to speed_weight.
+    """
+    import numpy as np
+    difficulties = np.linspace(d_range[0], d_range[1], resolution)
+    clarities = np.linspace(c_range[0], c_range[1], resolution)
+    eff_grid = np.zeros((resolution, resolution))
+
+    for ci, c in enumerate(clarities):
+        for di, d in enumerate(difficulties):
+            coord = SmashCoord(difficulty=int(d), clarity=int(c))
+            quality = smash.fit(coord)
+            eff_grid[ci, di] = compound_efficiency(
+                quality=quality,
+                tok_s=tok_s,
+                cost_input=cost_input,
+                cost_output=cost_output,
+                coord=coord,
+                hw_speed_modifier=hw_speed_modifier,
+                cloud_speed_modifier=cloud_speed_modifier,
+                power_w=power_w,
+                speed_weight=speed_weight,
+            )
+
+    return difficulties, clarities, eff_grid
 
 
 def compute_efficiency_surface(
@@ -2947,6 +3254,10 @@ class Contender:
 
     club: str = "🪨"
 
+    # Language proficiency — multiplier per language (1.0 = native capability)
+    # Computed from benchmark data where available; heuristic defaults otherwise.
+    lang_proficiency: dict[str, float] = field(default_factory=lambda: {"default": 1.0})
+
     # Club Smash capability (computed on init)
     smash: SmashRange = field(default_factory=lambda: SmashRange(10, 30, 50, 65))
 
@@ -2962,6 +3273,15 @@ class Contender:
                 self.is_moe, self.quant,
                 self.is_local, self.is_gpu,
             )
+        # Language proficiency: use measured data if available, else heuristic
+        if self.lang_proficiency == {"default": 1.0}:
+            measured = MEASURED_LANG_PROFICIENCY.get(self.name)
+            if measured:
+                self.lang_proficiency = measured
+            else:
+                self.lang_proficiency = estimate_lang_proficiency(
+                    self.params_b, self.active_params_b, self.is_moe,
+                )
 
     @property
     def effective_params(self) -> float:
@@ -3609,8 +3929,8 @@ def fight_tiered(
         result.energy_j = (sum(powers) / len(powers)) * result.elapsed_s
 
     # Club Smash — right-sizing
-    map_fit = map_c.smash.fit(task.coord_for("map"))
-    fill_fit = fill_c.smash.fit(task.coord_for("fill"))
+    map_fit = map_c.smash.fit(task.coord_for("map"), lang=task.lang, lang_proficiency=map_c.lang_proficiency)
+    fill_fit = fill_c.smash.fit(task.coord_for("fill"), lang=task.lang, lang_proficiency=fill_c.lang_proficiency)
     result.smash_fit = min(map_fit, fill_fit)
     result.smash_measured = measured_smash(
         result.quality, result.elapsed_s, result.smash_fit,
@@ -3660,7 +3980,7 @@ def fight_oneshot(contender: Contender, task: TournamentTask,
         result.energy_j = contender.power_w * result.elapsed_s
 
     # Club Smash — right-sizing
-    result.smash_fit = contender.smash.fit(task.coord_for("oneshot"))
+    result.smash_fit = contender.smash.fit(task.coord_for("oneshot"), lang=task.lang, lang_proficiency=contender.lang_proficiency)
     result.smash_measured = measured_smash(
         result.quality, result.elapsed_s, result.smash_fit,
     )

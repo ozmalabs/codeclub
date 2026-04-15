@@ -26,15 +26,20 @@ import numpy as np
 
 # Import the smash system from tournament
 from tournament import (
+    HARDWARE_PROFILES,
     ROLE_DEFAULTS,
     TASKS,
     SmashCoord,
     SmashRange,
     build_contenders,
     check_endpoints,
+    compound_efficiency,
+    compute_compound_surface,
     compute_efficiency_surface,
     estimate_smash_range,
     estimate_token_load,
+    value_efficiency,
+    wallclock_score,
 )
 
 # Output directory
@@ -407,9 +412,258 @@ def render_efficiency_png(
     return outfile
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PLOTLY RENDERER — interactive HTML with hover + toggle
-# ═══════════════════════════════════════════════════════════════════════════════
+def render_value_png(
+    name: str,
+    smash: SmashRange,
+    tok_s: float,
+    cost_input: float,
+    cost_output: float,
+    hw_profile: str = "gpu_consumer",
+    power_w: float | None = None,
+    task_coords: dict[str, SmashCoord] | None = None,
+    outfile: str | Path | None = None,
+    resolution: int = 200,
+) -> Path:
+    """
+    Render a compound efficiency map — the TRUE efficiency surface.
+
+    Value (quality per dollar) blended with wallclock speed via speed_weight.
+    High = model is right-sized, correct, AND affordable for this task.
+    """
+    plt = _setup_matplotlib()
+    from matplotlib.colors import LinearSegmentedColormap
+
+    hw = HARDWARE_PROFILES.get(hw_profile, HARDWARE_PROFILES["gpu_consumer"])
+    # hw speed modifier from profile
+    eff_power = power_w if power_w is not None else hw.power_w
+
+    d, c, eff_grid = compute_compound_surface(
+        smash, tok_s,
+        cost_input=cost_input, cost_output=cost_output,
+        hw_speed_modifier=hw.speed_modifier, power_w=eff_power,
+        resolution=resolution,
+    )
+
+    fig, ax = plt.subplots(figsize=(12, 9))
+
+    # Compound efficiency colormap: dark → blue → cyan → green → gold
+    colours = ["#0d0d0d", "#1a0033", "#2200aa", "#0066ff",
+               "#00ccaa", "#00e676", "#aaff00", "#ffd700"]
+    cmap = LinearSegmentedColormap.from_list("compound", colours, N=256)
+
+    cf = ax.contourf(d, c, eff_grid, levels=50, cmap=cmap, vmin=0, vmax=100)
+    cbar = fig.colorbar(cf, ax=ax, label="Compound Efficiency (0–100)", shrink=0.85)
+    cbar.ax.yaxis.label.set_color("#e0e0e0")
+    cbar.ax.tick_params(colors="#e0e0e0")
+
+    # Contour lines at meaningful thresholds
+    cs = ax.contour(d, c, eff_grid,
+                    levels=[10, 25, 40, 55, 70, 85],
+                    colors="white", linewidths=0.8, alpha=0.5)
+    ax.clabel(cs, inline=True, fontsize=8, fmt="%.0f")
+
+    # Sweet spot marker
+    ax.plot(smash.sweet, max(smash.min_clarity, 50),
+            marker="*", markersize=16, color="#ffd700",
+            markeredgecolor="white", markeredgewidth=1.5, zorder=10)
+
+    # Capability boundaries
+    ax.axvline(smash.low, color="#ff6666", linestyle="--", alpha=0.4, linewidth=1)
+    ax.axvline(smash.high, color="#ff6666", linestyle="--", alpha=0.4, linewidth=1)
+    ax.axhline(smash.min_clarity, color="#6688ff", linestyle="--", alpha=0.4, linewidth=1)
+
+    # Task overlays
+    if task_coords:
+        for tid, coord in task_coords.items():
+            eff = compound_efficiency(
+                quality=smash.fit(coord), tok_s=tok_s,
+                cost_input=cost_input, cost_output=cost_output,
+                coord=coord, hw_speed_modifier=hw.speed_modifier,
+                power_w=eff_power,
+            )
+            if eff >= 50:
+                colour = "#00e676"
+            elif eff >= 25:
+                colour = "#ffab00"
+            else:
+                colour = "#ff1744"
+            ax.scatter(coord.difficulty, coord.clarity,
+                       s=60, color=colour, edgecolors="white",
+                       linewidths=1.0, zorder=8)
+            ax.annotate(f"{tid}\n{eff:.0f}", (coord.difficulty, coord.clarity),
+                        xytext=(5, 5), textcoords="offset points",
+                        fontsize=7, color="white", weight="bold",
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  facecolor="#000000", alpha=0.6))
+
+    ax.set_xlabel("Task Difficulty →", fontsize=12)
+    ax.set_ylabel("Task Clarity ↑", fontsize=12)
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    ax.grid(True, linewidth=0.3)
+
+    safe = _strip_emoji(name)
+    cost_str = f"${cost_input:.2f}/${cost_output:.2f}" if cost_input > 0 else "local"
+    ax.set_title(
+        f"{safe} — Compound Efficiency  [{tok_s:.0f} tok/s · {cost_str} · {hw.name}]",
+        fontsize=13, pad=10,
+    )
+    fig.suptitle(
+        "Club Smash: Quality × Speed × Cost  (0=impossible, 100=free+instant)",
+        fontsize=11, y=1.01, color="#999999",
+    )
+
+    if outfile is None:
+        safe_name = safe.replace(" ", "_").replace(":", "-").replace("/", "-")
+        outfile = OUT_DIR / f"{safe_name}_value.png"
+    outfile = Path(outfile)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outfile, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outfile
+
+
+def render_3d_surface_png(
+    name: str,
+    smash: SmashRange,
+    tok_s: float,
+    cost_input: float,
+    cost_output: float,
+    hw_profile: str = "gpu_consumer",
+    power_w: float | None = None,
+    outfile: str | Path | None = None,
+    resolution: int = 100,
+) -> Path:
+    """
+    Render a 3D surface plot: difficulty × clarity × compound efficiency.
+
+    Height AND colour = compound efficiency. The peak of the surface is
+    where the model is most efficient for the money.
+    """
+    plt = _setup_matplotlib()
+    from matplotlib.colors import LinearSegmentedColormap
+
+    hw = HARDWARE_PROFILES.get(hw_profile, HARDWARE_PROFILES["gpu_consumer"])
+    # hw speed modifier from profile
+    eff_power = power_w if power_w is not None else hw.power_w
+
+    d, c, eff_grid = compute_compound_surface(
+        smash, tok_s,
+        cost_input=cost_input, cost_output=cost_output,
+        hw_speed_modifier=hw.speed_modifier, power_w=eff_power,
+        resolution=resolution,
+    )
+
+    D, C = np.meshgrid(d, c)
+    colours = ["#0d0d0d", "#1a0033", "#2200aa", "#0066ff",
+               "#00ccaa", "#00e676", "#aaff00", "#ffd700"]
+    cmap = LinearSegmentedColormap.from_list("compound", colours, N=256)
+
+    fig = plt.figure(figsize=(14, 10))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.plot_surface(D, C, eff_grid, cmap=cmap, vmin=0, vmax=100,
+                    alpha=0.9, rstride=2, cstride=2, edgecolor="none")
+
+    ax.set_xlabel("Difficulty →", fontsize=10, labelpad=10)
+    ax.set_ylabel("Clarity ↑", fontsize=10, labelpad=10)
+    ax.set_zlabel("Efficiency", fontsize=10, labelpad=10)
+    ax.set_zlim(0, 100)
+    ax.view_init(elev=30, azim=-60)
+
+    safe = _strip_emoji(name)
+    cost_str = f"${cost_input:.2f}/${cost_output:.2f}" if cost_input > 0 else "local"
+    ax.set_title(
+        f"{safe} — 3D Efficiency Surface\n"
+        f"[{tok_s:.0f} tok/s · {cost_str} · {hw.name}]",
+        fontsize=12, pad=20,
+    )
+
+    if outfile is None:
+        safe_name = safe.replace(" ", "_").replace(":", "-").replace("/", "-")
+        outfile = OUT_DIR / f"{safe_name}_3d.png"
+    outfile = Path(outfile)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outfile, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outfile
+
+
+def render_value_overlay_png(
+    contenders: list,
+    hw_profile: str = "gpu_consumer",
+    task_coords: dict[str, SmashCoord] | None = None,
+    outfile: str | Path | None = None,
+    resolution: int = 200,
+) -> Path:
+    """
+    Overlay compound efficiency contours for multiple models on one chart.
+
+    Shows where each model's efficiency island sits — the gaps and overlaps
+    tell you where routing decisions matter most.
+    """
+    plt = _setup_matplotlib()
+    fig, ax = plt.subplots(figsize=(14, 10))
+
+    hw = HARDWARE_PROFILES.get(hw_profile, HARDWARE_PROFILES["gpu_consumer"])
+    model_colors = plt.cm.tab20(np.linspace(0, 1, len(contenders)))
+
+    for idx, c in enumerate(contenders):
+        d, cl, eff_grid = compute_compound_surface(
+            c.smash, c.tok_s or 50.0,
+            cost_input=c.cost_input, cost_output=c.cost_output,
+            hw_speed_modifier=hw.speed_modifier,
+            power_w=c.power_w if c.power_w else hw.power_w,
+            resolution=resolution,
+        )
+        # Draw the efficiency contours
+        color = model_colors[idx]
+        cs = ax.contour(d, cl, eff_grid, levels=[25, 50],
+                        colors=[color], linewidths=1.5, alpha=0.8)
+        # Label the highest visible contour with model name
+        labelled = False
+        for seg_list in reversed(cs.allsegs):
+            if labelled:
+                break
+            for seg in seg_list:
+                if len(seg) > 0:
+                    mid = len(seg) // 2
+                    ax.annotate(c.name, (seg[mid, 0], seg[mid, 1]),
+                                fontsize=7, color=color, weight="bold",
+                                bbox=dict(boxstyle="round,pad=0.2",
+                                          facecolor="#000000", alpha=0.6))
+                    labelled = True
+                    break
+
+    if task_coords:
+        for tid, coord in task_coords.items():
+            ax.scatter(coord.difficulty, coord.clarity,
+                       s=40, color="white", edgecolors="#666",
+                       linewidths=0.8, zorder=8, alpha=0.7)
+            ax.annotate(tid, (coord.difficulty, coord.clarity),
+                        xytext=(4, 4), textcoords="offset points",
+                        fontsize=6, color="#cccccc")
+
+    ax.set_xlabel("Task Difficulty →", fontsize=12)
+    ax.set_ylabel("Task Clarity ↑", fontsize=12)
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    ax.grid(True, linewidth=0.3)
+    ax.set_title(
+        f"Compound Efficiency Overlay — {len(contenders)} models  [{hw.name}]",
+        fontsize=13, pad=10,
+    )
+    fig.suptitle(
+        "Contours: inner=50, outer=25  ·  Quality × Speed × Cost",
+        fontsize=10, y=1.01, color="#999999",
+    )
+
+    if outfile is None:
+        outfile = OUT_DIR / "value_overlay.png"
+    outfile = Path(outfile)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outfile, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return outfile
 
 def render_single_html(
     smash: SmashRange,
@@ -741,7 +995,24 @@ def main():
     )
     parser.add_argument(
         "--efficiency", action="store_true",
-        help="Render TRUE efficiency maps (time-to-complete + capability×speed)",
+        help="Render capability×speed maps (time-to-complete)",
+    )
+    parser.add_argument(
+        "--value", action="store_true",
+        help="Render compound efficiency maps (quality×cost with speed blend)",
+    )
+    parser.add_argument(
+        "--value-3d", action="store_true",
+        help="Render 3D compound efficiency surfaces",
+    )
+    parser.add_argument(
+        "--hw-profile", default="gpu_consumer",
+        choices=list(HARDWARE_PROFILES.keys()),
+        help="Hardware profile for compound efficiency (default: gpu_consumer)",
+    )
+    parser.add_argument(
+        "--speed-weight", type=float, default=0.5,
+        help="How much wallclock matters: 0=pure value, 0.5=balanced, 1=speed-critical (default: 0.5)",
     )
     args = parser.parse_args()
 
@@ -810,7 +1081,7 @@ def main():
                 f = render_single_html(c.smash, label, task_coords)
                 generated.append(f)
                 print(f"      HTML: {f}")
-            # Efficiency maps (true compressor maps)
+            # Efficiency maps (capability × speed)
             if args.efficiency and do_png:
                 f = render_efficiency_png(
                     label, c.smash, c.tok_s or 50.0,
@@ -818,6 +1089,27 @@ def main():
                 )
                 generated.append(f)
                 print(f"      EFF:  {f}")
+            # Compound efficiency maps (value with speed blend)
+            if args.value and do_png:
+                hw_label = "cloud_api" if not c.is_local else args.hw_profile
+                f = render_value_png(
+                    label, c.smash, c.tok_s or 50.0,
+                    cost_input=c.cost_input, cost_output=c.cost_output,
+                    hw_profile=hw_label, power_w=c.power_w,
+                    task_coords=task_coords,
+                )
+                generated.append(f)
+                print(f"      VAL:  {f}")
+            # 3D compound surfaces
+            if args.value_3d and do_png:
+                hw_label = "cloud_api" if not c.is_local else args.hw_profile
+                f = render_3d_surface_png(
+                    label, c.smash, c.tok_s or 50.0,
+                    cost_input=c.cost_input, cost_output=c.cost_output,
+                    hw_profile=hw_label, power_w=c.power_w,
+                )
+                generated.append(f)
+                print(f"      3D:   {f}")
 
     # Overlay map
     if args.overlay or (not args.model and not args.compare):
@@ -831,6 +1123,15 @@ def main():
             f = render_overlay_html(models, task_coords)
             generated.append(f)
             print(f"      HTML: {f}")
+        # Compound efficiency overlay
+        if args.value and do_png:
+            print(f"\n  🏏  Rendering value overlay ({len(contenders)} models, {args.hw_profile})...")
+            f = render_value_overlay_png(
+                contenders, hw_profile=args.hw_profile,
+                task_coords=task_coords,
+            )
+            generated.append(f)
+            print(f"      VAL OVERLAY: {f}")
 
     # Size comparison example: GPT-4.1 family
     if not args.model and not args.compare:
