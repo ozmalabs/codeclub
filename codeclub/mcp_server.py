@@ -85,6 +85,50 @@ def _ensure_models():
 
 
 # ---------------------------------------------------------------------------
+# Copilot premium request multipliers (from GitHub docs)
+# https://docs.github.com/en/copilot/concepts/billing/copilot-requests
+# Overage rate: $0.04 per premium request × multiplier
+# ---------------------------------------------------------------------------
+
+COPILOT_MULTIPLIERS: dict[str, float] = {
+    # Included models (0× on paid plans, 1× on free)
+    "gpt-5-mini": 0, "gpt-4-1": 0, "gpt-4o": 0, "raptor-mini": 0,
+    # Cheap premium
+    "gemini-2-0-flash": 0.25, "gemini-2-5-flash": 0.25,
+    # Standard premium (1×)
+    "claude-sonnet-4": 1, "claude-sonnet-4-5": 1, "claude-sonnet-4-6": 1,
+    "claude-sonnet-3-5": 1, "claude-sonnet-3-7": 1,
+    "gpt-5": 1, "gpt-5-1": 1, "gpt-5-2": 1,
+    "gemini-2-5-pro": 1,
+    # Extended thinking
+    "claude-sonnet-3-7-reasoning": 1.25,
+    # Mid premium
+    "claude-opus-4-5": 3,
+    "gpt-5-3-codex": 1, "gpt-5-2-codex": 1,
+    # Heavy premium
+    "claude-opus-4": 10, "claude-opus-4-6": 10,
+    "o1": 10, "o3": 10, "o3-mini": 1, "o4-mini": 1,
+    # Ultra premium
+    "gpt-4-5": 50,
+}
+
+COPILOT_OVERAGE_RATE = 0.04  # USD per premium request
+
+
+def _copilot_multiplier(model_id: str) -> float | None:
+    """Look up the Copilot premium request multiplier for a model ID."""
+    norm = _normalise_id(model_id)
+    # Exact match
+    if norm in COPILOT_MULTIPLIERS:
+        return COPILOT_MULTIPLIERS[norm]
+    # Substring match (e.g. "claude-opus-4-6" in "copilot:claude-opus-4-6")
+    for key, mult in COPILOT_MULTIPLIERS.items():
+        if key in norm or norm in key:
+            return mult
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Model matching — fuzzy match client IDs against the known registry
 # ---------------------------------------------------------------------------
 
@@ -547,9 +591,14 @@ def _handle_set_models(args: dict) -> list[TextContent]:
         # Try matching against known registry
         spec = _match_registry(client_id, m.REGISTRY)
         if spec:
-            matched.append({"client_id": client_id, "matched": spec.id,
-                            "name": spec.name, "cost_in": spec.cost_in,
-                            "cost_out": spec.cost_out})
+            mult = _copilot_multiplier(client_id) or _copilot_multiplier(spec.id)
+            entry = {"client_id": client_id, "matched": spec.id,
+                     "name": spec.name, "cost_in": spec.cost_in,
+                     "cost_out": spec.cost_out}
+            if mult is not None:
+                entry["copilot_multiplier"] = mult
+                entry["copilot_cost_per_request"] = round(mult * COPILOT_OVERAGE_RATE, 3)
+            matched.append(entry)
             new_models.append(spec)
             new_ids.add(spec.id)
         else:
@@ -624,15 +673,13 @@ def _handle_route(args: dict) -> list[TextContent]:
 
     # Build response with per-phase assignments
     phases = {}
-    total_cost_per_1k_calls = 0.0
+    total_premium_requests = 0.0
     for phase, model in sorted(suite.items()):
         if model is None:
             phases[phase] = {"model": None, "reason": "no model available"}
         else:
-            avg_tokens = 2000  # rough estimate per phase call
-            phase_cost = (model.cost_in + model.cost_out) * avg_tokens / 1_000_000
-            total_cost_per_1k_calls += phase_cost * 1000
-            phases[phase] = {
+            mult = _copilot_multiplier(model.id)
+            phase_info = {
                 "model_id": model.id,
                 "model_name": model.name,
                 "cost_in": model.cost_in,
@@ -640,6 +687,11 @@ def _handle_route(args: dict) -> list[TextContent]:
                 "local": model.local,
                 "max_complexity": model.max_complexity,
             }
+            if mult is not None:
+                phase_info["copilot_multiplier"] = mult
+                phase_info["copilot_cost"] = round(mult * COPILOT_OVERAGE_RATE, 3)
+                total_premium_requests += mult
+            phases[phase] = phase_info
 
     # Strategy advice
     if c < 40:
@@ -659,6 +711,13 @@ def _handle_route(args: dict) -> list[TextContent]:
         "strategy": strategy,
         "phases": phases,
     }
+
+    if total_premium_requests > 0:
+        result["copilot_total_premium_requests"] = total_premium_requests
+        result["copilot_total_cost"] = round(total_premium_requests * COPILOT_OVERAGE_RATE, 3)
+    elif any(_copilot_multiplier(m.id) == 0 for m in _seeded_models if _seeded_models):
+        result["copilot_total_premium_requests"] = 0
+        result["copilot_note"] = "All phases use included models (free on paid plans)"
 
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -685,7 +744,7 @@ def _handle_list_models(args: dict) -> list[TextContent]:
 
     rows = []
     for model in sorted(models, key=lambda x: (x.cost_in, x.id)):
-        rows.append({
+        entry = {
             "id": model.id,
             "name": model.name,
             "provider": model.provider,
@@ -695,7 +754,12 @@ def _handle_list_models(args: dict) -> list[TextContent]:
             "local": model.local,
             "max_complexity": model.max_complexity,
             "phases": sorted(model.phases),
-        })
+        }
+        mult = _copilot_multiplier(model.id)
+        if mult is not None:
+            entry["copilot_multiplier"] = mult
+            entry["copilot_included"] = mult == 0
+        rows.append(entry)
 
     result = {
         "source": source,
