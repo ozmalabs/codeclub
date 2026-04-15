@@ -894,6 +894,91 @@ def create_app(
         if full_response and store is not None and ep_id is not None:
             store.add_turn(ep_id, "assistant", full_response)
 
+    # ------------------------------------------------------------------
+    # Classification / routing API
+    # ------------------------------------------------------------------
+
+    @app.post("/v1/classify")
+    async def classify_task_endpoint(request: Request):
+        """Classify a task and return routing recommendation."""
+        body = await request.json()
+        task = body.get("task", "")
+
+        if not task:
+            return {"error": "task is required"}
+
+        if _classify_and_estimate is None:
+            return {"error": "classification engine not available"}
+
+        classification, coord, profile = _classify_and_estimate(task)
+        est_tokens = profile.total_tokens(coord) if profile else None
+        est_cost = (est_tokens * 0.5e-6) if est_tokens else None
+
+        return {
+            "classification": {
+                "category": classification.category,
+                "subcategory": classification.subcategory,
+                "confidence": round(classification.confidence, 3),
+                "confidence_tier": classification.confidence_tier,
+                "signals": classification.signals,
+            },
+            "coordinates": {
+                "difficulty": coord.difficulty,
+                "clarity": coord.clarity,
+            },
+            "profile": {
+                "key": classification.suggested_profile,
+                "category": profile.category if profile else None,
+                "estimated_tokens": est_tokens,
+                "estimated_cost_usd": round(est_cost, 4) if est_cost else None,
+                "gather_rounds": profile.gather_rounds if profile else None,
+                "iterations": profile.iterations if profile else None,
+            } if profile else None,
+            "summary": _format_summary(
+                classification, coord,
+                estimated_tokens=est_tokens,
+                estimated_cost=est_cost,
+            ) if _format_summary else None,
+        }
+
+    @app.get("/v1/proxy/stats")
+    async def proxy_stats():
+        """Return proxy statistics including classification and routing data."""
+        return {
+            "requests": stats["requests"],
+            "tokens_original": stats["tokens_original"],
+            "tokens_assembled": stats["tokens_assembled"],
+            "tokens_saved": stats["tokens_original"] - stats["tokens_assembled"],
+            "compression_ratio": 1 - stats["tokens_assembled"] / max(stats["tokens_original"], 1),
+            "uplifts_performed": stats["uplifts_performed"],
+            "model_downgrades": stats["model_downgrades"],
+            "episodes_created": stats["episodes_created"],
+        }
+
+    # ------------------------------------------------------------------
+    # Serve web UI if available (optional — proxy works without it)
+    # ------------------------------------------------------------------
+    _web_dist = Path(__file__).parent.parent.parent / "web" / "frontend" / "dist"
+    if _web_dist.exists():
+        from fastapi.staticfiles import StaticFiles
+        from fastapi.responses import FileResponse
+
+        app.mount("/web/assets", StaticFiles(directory=str(_web_dist / "assets")), name="web-assets")
+
+        @app.get("/web/{full_path:path}")
+        async def serve_web_ui(full_path: str):
+            """Serve web UI — SPA client-side routing."""
+            file_path = _web_dist / full_path
+            if full_path and file_path.exists() and file_path.is_file():
+                return FileResponse(file_path)
+            return FileResponse(_web_dist / "index.html")
+
+        @app.get("/web")
+        async def web_root():
+            return FileResponse(_web_dist / "index.html")
+
+        logger.info("Web UI available at /web/")
+
     return app
 
 
