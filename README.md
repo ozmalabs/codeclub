@@ -1,47 +1,95 @@
 # codeclub
 
 > Caveman not have H100. Caveman only have club.
+> But caveman learn which club fit which rock.
 
-Three tools that compose. Use one, two, or all three.
+## The story
+
+It started with a question: **why does my local 8B model get the same tokens as GPT-5?**
+
+I was running [Caveman](https://github.com/juliusbrussee/caveman) — the insight that
+you don't need frontier models if you compress intelligently. Stub out functions,
+send structure not source, reconstruct on the other side. Beautiful. 70–95% token
+savings. But then I watched my little rnj-1:8b on an Arc B580 nail a rate limiter,
+choke on a parser, and completely die on a vague spec.
+
+Same model. Same hardware. Wildly different results. **The model wasn't the problem.
+The match was.**
+
+So I built efficiency maps — like turbo compressor maps but for LLMs. Two axes:
+task difficulty and spec clarity. Every model has a sweet spot. Outside it, you're
+wasting money (too powerful) or wasting time (too weak). Run 232 fights across 19
+models and 28 tasks, and the patterns are unmistakable: there's a clarity cliff
+below ~40 where *all* models crater, language-specific blindspots (gemini-2.5-pro
+literally cannot write valid Rust), and tiny models that outperform giants when
+you give them a clear enough spec.
+
+That led to dynamic context — instead of accumulating everything and compacting
+when full, index everything and retrieve per-request. Classify the intent, assemble
+only what's relevant, optionally uplift vague specs before routing, and pick the
+best-fit model for the actual context size. The result: 50–60% token savings *on
+top of* compression, and routing that actually knows which club fits which rock.
+
+**Caveman not need biggest club. Caveman need right club.**
+
+---
+
+## What it does
 
 | | What | Result |
 |---|---|---|
 | 🗜️ **Compress** | Strip context to what the model actually needs | 70–95% fewer tokens, zero quality loss |
 | 🔄 **Dev loop** | Spec → generate → test → fix → review → report | Working code from a sentence |
-| 🧭 **Route** | Club until it fits | $0 local runs that match cloud quality |
+| 🧭 **Route** | Right-size model to task — difficulty, clarity, language | $0 local runs that match cloud quality |
+| 🧠 **Dynamic context** | Index everything, retrieve per-request, never fill up | 50–60% fewer tokens on top of compression |
 
-## Caveman vs cloud
+Use one, two, or all four. They compose.
 
-118 fights. 14 models. 8 tasks (Python + Rust, difficulty 8–55). Real runs, real numbers.
+## The numbers
 
-| Model | Pass Rate | Avg Time | Cost/Fight | Cost/Pass |
-|---|---|---|---|---|
-| **rnj-1:8b** Q6_K *(Arc B580)* | **75%** | 11.7s | $0.00017¹ | $0.00023¹ |
-| **claude-sonnet-4.6** | **80%** | 6.5s | $0.008 | $0.008 |
-| **gpt-5.4** | **75%** | 6.3s | $0.004 | $0.006 |
-| **deepseek-v3.1** bf16 | **75%** | 29.3s | $0.0005 | $0.0007 |
-| **codestral-2508** bf16 | 62% | **3.0s** | $0.0004 | $0.0007 |
-| gpt-5.4-nano | 50% | 5.7s | $0.0003 | $0.0004 |
-| devstral-small | 38% | **2.7s** | $0.0001 | $0.0004 |
-| gemini-2.5-pro | 12% | 34.1s | $0.032 | **$0.25** |
+232 fights. 19 models. 28 tasks across Python and Rust, difficulty 8–95, clarity 5–85.
 
-*¹ Electricity cost at $0.35/kWh (US avg). Arc B580 draws ~150W during inference.*
+| Model | Fights | Avg Quality | Avg Time | Total Cost | Hardware |
+|---|---:|---:|---:|---:|---|
+| **gpt-5.4-mini** | 12 | **94%** | 4.0s | $0.038 | cloud |
+| **claude-sonnet-4.6** | 12 | **92%** | 15.4s | $0.270 | cloud |
+| **gpt-5.4** | 12 | **91%** | 9.3s | $0.140 | cloud |
+| deepseek-v3.1 | 12 | 76% | 54.0s | $0.009 | cloud |
+| gemini-2.5-flash | 12 | 73% | 13.7s | $0.085 | cloud |
+| **gpt-5.4-nano** | 12 | **72%** | 8.4s | $0.020 | cloud |
+| deepseek-r1 | 12 | 71% | 236s | $0.151 | cloud |
+| codestral-2508 | 12 | 67% | **3.1s** | $0.007 | cloud |
+| **rnj-1:8b** Q6_K | 28 | 45% | 13.8s | $0.0002¹ | Arc B580 (150W) |
+| **qwen2.5-coder:1.5b** Q4_K_M | 12 | 43% | 12.9s | $0.0001¹ | CPU (100W) |
+| gemma4-26b-a4b Q8_0 | 16 | 33% | 34.4s | $0.0003¹ | GPU (500W) |
+| phi-4 | 12 | 26% | 9.9s | $0.001 | cloud |
 
-Caveman pay electricity. Cloud pay rent. Electricity cheaper.
+*¹ Electricity cost at $0.35/kWh. Local models are not free — we track the power.*
 
-![Quality vs Cost](benchmarks/maps/quality_vs_cost.png)
-![Efficiency Map](benchmarks/maps/efficiency_scatter.png)
+### Language capability
+
+Models aren't equally good at everything. Data from high-clarity tasks only:
+
+| Model | Python | Rust | Gap |
+|---|---:|---:|---|
+| gpt-5.4-mini | 98% | 87% | +11pp |
+| claude-sonnet-4.6 | 100% | 82% | +18pp |
+| deepseek-r1 | 63% | **100%** | **−33pp** (better at Rust!) |
+| devstral-small | 71% | **0%** | complete blindspot |
+| gemini-2.5-pro | 57% | 38% | can't write valid Rust |
+| qwen2.5-coder:1.5b | 65% | 12% | +53pp |
+
+This is why routing needs a language axis. Sending a Rust task to gemini-2.5-pro is
+burning money. → [Full results](docs/benchmarks.md)
 
 ### Compression savings (real files)
 
-| File | Tokens | After full pipeline | Saved |
+| File | Tokens | After pipeline | Saved |
 |---|---:|---:|---:|
 | wallet_stripe.py (934 lines) | 7,202 | 300 | **96%** |
 | 2 wallet files combined (1,343 lines) | 9,680 | 789 | **92%** |
 | wallet_local.py (409 lines) | 2,478 | 489 | **80%** |
 | wallet_bridge_snippet.py (78 lines) | 504 | 160 | **68%** |
-
-→ [Full benchmark results](benchmarks/results/latest.md)
 
 ## Quick start
 
@@ -50,7 +98,7 @@ git clone https://github.com/ozmalabs/codeclub && cd codeclub
 uv sync
 uv run pytest tests/
 
-# Hit task with club (use any setup — local_gpu, copilot, anthropic, etc.)
+# Hit task with club
 uv run python dev_loop.py "Build a rate limiter with token bucket algorithm" \
     --setup local_gpu \
     --max-iterations 3 \
@@ -91,9 +139,9 @@ result = run("Build a RateLimiter class with token bucket algorithm",
 ```
 
 Big model designs the skeleton. Small model fills each function in parallel
-(Skeleton-of-Thought). Once the stub map sets the interface contract, filling a
-single isolated function body is well within a 3B model's capability. You don't
-need a frontier model for the whole thing.
+([Skeleton-of-Thought](https://arxiv.org/abs/2307.15337)). Once the stub map sets
+the interface contract, filling a single isolated function body is well within a 3B
+model's capability. You don't need a frontier model for the whole thing.
 
 Stack hints auto-detect your project type and inject library constraints into every
 prompt. Data-driven, not LLM-based. Models use the right libraries, right versions,
@@ -154,6 +202,11 @@ Every model has an efficiency map — like a turbo compressor map. Two axes:
 is where the model is right-sized. Outside it, the model is either overkill or
 overwhelmed.
 
+The empirical finding: there's a **clarity cliff** around 40. Below it, *every*
+model craters to ~0% regardless of capability. Above 50, even small models hit
+80–100%. This isn't a linear decay — it's a sigmoid. The routing system uses this
+to decide when a vague spec should be uplifted before sending to any model.
+
 Roles aren't special code paths — they're just coordinates on this plane:
 
 | Role | Difficulty offset | Clarity | What it means |
@@ -165,15 +218,17 @@ Roles aren't special code paths — they're just coordinates on this plane:
 
 ### Efficiency maps
 
-**Quality matrix** — 14 models × 8 tasks. Green=100%, red=0%. The full picture.
+**Quality matrix** — 19 models × 28 tasks. Green=100%, red=0%.
 
 ![Quality matrix heatmap](benchmarks/maps/quality_matrix.png)
 
-**rnj-1:8b** (8B, Q6_K, B580 GPU) — Tight island around 35d. Nails easy-moderate tasks with clear specs.
+**rnj-1:8b** (8B, Q6_K, B580 GPU) — Tight island around 35d. Nails easy-moderate
+tasks with clear specs. The caveman's club.
 
 ![rnj-1:8b efficiency map](benchmarks/maps/rnj-1-8b.png)
 
-**qwen3-coder:30b** (30B, Q4_K_M, CPU) — Wide plateau. Handles ambiguity, covers most of the task space.
+**qwen3-coder:30b** (30B, Q4_K_M, CPU) — Wide plateau. Handles ambiguity, covers
+most of the task space.
 
 ![qwen3-coder:30b efficiency map](benchmarks/maps/qwen3-coder-30b.png)
 
@@ -194,6 +249,43 @@ python tournament.py --map                    # ASCII in terminal
 ```
 
 → [How Club Smash works](docs/club-smash.md)
+
+## Dynamic context — index everything, send nothing
+
+> The major problem with LLM conversations is context waste. Long, vague
+> discussions fill the window, then get compacted. Horribly inefficient.
+
+Instead: **index everything, retrieve per-request, never fill up.**
+
+The proxy sits between your client and any OpenAI-compatible API. For each
+request it:
+
+1. **Classifies** intent (10 categories — new task, debug, follow-up, refactor...)
+2. **Estimates clarity** and decides if the spec needs uplifting first
+3. **Assembles** only relevant context — code refs, recent turns, decisions
+4. **Routes** to the best-fit model given the actual context size
+5. **Indexes** the response for future retrieval
+6. **Compacts** old episodes in the background
+
+Five fit precision levels let you trade context tightness for safety margin:
+`minimal` → `tight` → `balanced` → `generous` → `full`
+
+The system learns: an adaptive tracker records outcomes per intent/fit level and
+adjusts padding automatically. If the model keeps asking for more context, the
+budget grows. If everything succeeds, it tightens.
+
+```bash
+# Start the proxy
+python -m codeclub.context --upstream http://localhost:11434/v1
+
+# Use any OpenAI-compatible client — it's transparent
+curl http://localhost:8400/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "X-Context-Fit: tight" \
+    -d '{"model": "rnj-1:8b", "messages": [{"role": "user", "content": "fix the auth bug"}]}'
+```
+
+→ [How dynamic context works](docs/dynamic-context.md)
 
 ## Agent plugin
 
@@ -227,15 +319,17 @@ pip install codeclub-infra    # routing only
 - [Dev loop](docs/dev-loop.md) — pipeline, fix loop, benchmarks, accounting
 - [Routing](docs/routing.md) — hardware declaration, setup presets, providers, dynamic levers
 - [Club Smash](docs/club-smash.md) — two-axis model routing, efficiency maps, right-sizing
+- [Dynamic context](docs/dynamic-context.md) — session indexing, per-request retrieval, adaptive fit
 - [Benchmarks](docs/benchmarks.md) — full results, reproduction steps, methodology
 - [Architecture](docs/architecture.md) — file map, references
 
 ## References
 
-- arXiv:2307.15337 — Skeleton-of-Thought: Prompting LLMs for Efficient Parallel Generation
-- arXiv:2604.00025 — Inverse Scaling Can Be Easily Overcome With Scale-Aware Prompting
-- arXiv:2601.19929 — Stingy Context / TREEFRAG structural compression
-- [Caveman](https://github.com/juliusbrussee/caveman)
+- [Caveman](https://github.com/juliusbrussee/caveman) — the original insight: you don't need frontier models
+- [arXiv:2307.15337](https://arxiv.org/abs/2307.15337) — Skeleton-of-Thought: Prompting LLMs for Efficient Parallel Generation
+- [arXiv:2604.00025](https://arxiv.org/abs/2604.00025) — Inverse Scaling Can Be Easily Overcome With Scale-Aware Prompting
+- [arXiv:2601.19929](https://arxiv.org/abs/2601.19929) — Stingy Context / TREEFRAG structural compression
+- [Compressor maps](https://en.wikipedia.org/wiki/Compressor_map) — the analogy behind efficiency maps
 
 ## Star This Repo
 

@@ -100,9 +100,96 @@ With semantic retrieval on a full repository (hundreds of files), codeclub routi
 
 ---
 
+## Scenario 4: Club Smash tournament (oneshot generation)
+
+232 fights. 19 models. 28 tasks spanning Python and Rust, difficulty 8–95,
+clarity 5–85. Each fight: model receives NL spec → generates code → tested
+against automated test suite. Pass = 100%, fail = 0%.
+
+Generated 2026-04-15 by `bench_tiered.py --difficulty all --tag full-update`.
+
+### Summary by model
+
+| Model | Fights | Avg Quality | Avg Time | Total Cost | Hardware |
+|---|---:|---:|---:|---:|---|
+| gpt-5.4-mini | 12 | 94% | 4.0s | $0.038 | cloud |
+| claude-sonnet-4.6 | 12 | 92% | 15.4s | $0.270 | cloud |
+| gpt-5.4 | 12 | 91% | 9.3s | $0.140 | cloud |
+| deepseek-v3.1 | 12 | 76% | 54.0s | $0.009 | cloud |
+| gemini-2.5-flash | 12 | 73% | 13.7s | $0.085 | cloud |
+| gpt-5.4-nano | 12 | 72% | 8.4s | $0.020 | cloud |
+| deepseek-r1 | 12 | 71% | 236s | $0.151 | cloud |
+| codestral-2508 | 12 | 67% | 3.1s | $0.007 | cloud |
+| claude-haiku-4.5 | 12 | 58% | 5.2s | $0.018 | cloud |
+| qwen3-coder:30b Q4_K_M | 16 | 56% | 78.3s | $0.0004 | CPU |
+| gemini-2.5-pro | 12 | 49% | 40.1s | $0.121 | cloud |
+| rnj-1:8b Q6_K | 28 | 45% | 13.8s | $0.0002 | Arc B580 |
+| qwen2.5-coder:1.5b Q4_K_M | 12 | 43% | 12.9s | $0.0001 | CPU |
+| gemma4-26b-a4b Q8_0 | 16 | 33% | 34.4s | $0.0003 | GPU |
+| phi-4 | 12 | 26% | 9.9s | $0.001 | cloud |
+| devstral-small | 12 | 17% | 3.7s | $0.001 | cloud |
+
+### Key findings
+
+**The clarity cliff**: below ~40 clarity, all models crater to ~0% quality.
+Above 50, even small models hit 80–100%. This is a sigmoid, not a linear decay.
+Implies vague specs waste tokens regardless of model capability.
+
+**Language blindspots**: gemini-2.5-pro literally cannot write valid Rust (syntax
+errors, unclosed delimiters). devstral-small and phi-4: 0% Rust. deepseek-r1 is
+*better* at Rust than Python (+33pp) — reasoning model advantage.
+
+**Value leaders**: gpt-5.4-mini at $0.003/fight averages 94% — best quality per
+dollar. codestral-2508 at 3.1s average is fastest. rnj-1:8b on a B580 GPU costs
+$0.000007/fight — caveman's club.
+
+**Efficiency maps**: every model has a sweet spot on the difficulty×clarity plane.
+Outside it, you're wasting money (overpowered) or time (underpowered). See
+[Club Smash](club-smash.md) for the maps.
+
+### Language capability matrix
+
+From high-clarity tasks only (clarity ≥ 60):
+
+| Model | Python | Rust | Gap |
+|---|---:|---:|---|
+| gpt-5.4-mini | 98% | 87% | +11pp |
+| claude-sonnet-4.6 | 100% | 82% | +18pp |
+| gpt-5.4 | 96% | 85% | +11pp |
+| deepseek-r1 | 63% | 100% | −33pp |
+| gemini-2.5-flash | 85% | 57% | +28pp |
+| codestral-2508 | 78% | 50% | +28pp |
+| devstral-small | 71% | 0% | complete blindspot |
+| phi-4 | 42% | 0% | complete blindspot |
+| gemini-2.5-pro | 57% | 38% | +19pp |
+| qwen2.5-coder:1.5b | 65% | 12% | +53pp |
+| rnj-1:8b | 55% | 30% | +25pp |
+
+### How to reproduce
+
+```bash
+# Source environment
+set -a && source .env && set +a
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# Run tournament (skips already-completed fights)
+uv run python bench_tiered.py --difficulty all --tag reproduce
+
+# Generate visualisations
+uv run python smash_viz.py
+```
+
+Requires:
+- `OPENROUTER_API_KEY` in `.env` for cloud models
+- Ollama running with `qwen2.5-coder:1.5b` for local CPU
+- llama-server on port 8081 for B580 GPU (rnj-1:8b)
+- `rustc` on PATH for Rust task compilation
+
+---
+
 ## Cost reference
 
 All "GPT-5.4 equiv" numbers use published pricing: $2.50/1M input, $15.00/1M output.
 Claude Opus 4.6: $15.00/1M input, $75.00/1M output.
-B580 local: 150W TDP × wall time × $0.15/kWh.
+B580 local: 150W TDP × wall time × $0.35/kWh.
 OpenRouter: model-specific rates from their pricing page.
