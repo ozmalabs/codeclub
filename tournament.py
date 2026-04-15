@@ -144,9 +144,92 @@ class RustRunner:
                     pass
 
 
+class TypeScriptRunner:
+    """Execute TypeScript / TSX code via tsx (zero-config TS execution)."""
+
+    lang = "typescript"
+
+    def _has_jsx(self, code: str) -> bool:
+        """Detect JSX syntax: <Tag, </Tag>, or <Tag />."""
+        import re
+        return bool(re.search(r'<[A-Z][a-zA-Z]*[\s/>]|<\/[a-zA-Z]|<[a-z]+\s+[a-zA-Z]+=', code))
+
+    def check_syntax(self, code: str) -> tuple[bool, str]:
+        import subprocess, tempfile
+        suffix = ".tsx" if self._has_jsx(code) else ".ts"
+        with tempfile.NamedTemporaryFile(suffix=suffix, mode="w", delete=False) as f:
+            f.write(code)
+            f.flush()
+            src = f.name
+        try:
+            r = subprocess.run(
+                ["tsx", src],
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, "NODE_NO_WARNINGS": "1"},
+            )
+            if r.returncode == 0:
+                return True, ""
+            err = r.stderr[:500] or r.stdout[:500]
+            # Filter to just the error, skip node warnings
+            return False, err
+        except FileNotFoundError:
+            return False, "tsx not installed: npm install -g tsx"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            try:
+                os.unlink(src)
+            except FileNotFoundError:
+                pass
+
+    def run_test(self, impl_code: str, test_code: str) -> tuple[bool, str]:
+        import subprocess, tempfile
+        # JSX preamble: lightweight createElement for component testing
+        preamble = textwrap.dedent("""\
+            import { strict as assert } from "node:assert";
+            type VNode = { type: string | Function; props: Record<string, any>; children: any[] };
+            function createElement(type: string | Function, props: Record<string, any> | null, ...children: any[]): VNode {
+              return { type, props: props ?? {}, children: children.flat() };
+            }
+            const React = { createElement };
+        """)
+        # Wrap async tests in IIFE (tsx .ts files don't support top-level await)
+        has_tl_await = "await " in test_code and "async " not in test_code.split("await")[0].split("\n")[-1]
+        if has_tl_await:
+            test_code = "(async () => {\n" + test_code + "\n})().catch((e: any) => { console.error(e); process.exit(1); });"
+        full = preamble + "\n" + impl_code + "\n" + test_code
+        suffix = ".tsx" if self._has_jsx(full) else ".ts"
+        with tempfile.NamedTemporaryFile(suffix=suffix, mode="w", delete=False) as f:
+            f.write(full)
+            f.flush()
+            src = f.name
+        try:
+            r = subprocess.run(
+                ["tsx", src],
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, "NODE_NO_WARNINGS": "1"},
+            )
+            if r.returncode == 0:
+                return True, ""
+            err = r.stderr[:500] or r.stdout[:500]
+            return False, err
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        except FileNotFoundError:
+            return False, "tsx not installed: npm install -g tsx"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            try:
+                os.unlink(src)
+            except FileNotFoundError:
+                pass
+
+
 RUNNERS: dict[str, LanguageRunner] = {
     "python": PythonRunner(),
     "rust": RustRunner(),
+    "typescript": TypeScriptRunner(),
 }
 
 
@@ -3822,9 +3905,1071 @@ TASKS["rust-minidb-vague"] = TournamentTask(
 )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CONTENDERS — models with hardware / cost / MoE metadata
-# ═══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# TypeScript / TSX tasks
+# ---------------------------------------------------------------------------
+# Tests use the preamble injected by TypeScriptRunner.run_test():
+#   - import { strict as assert } from "node:assert"
+#   - Lightweight React.createElement shim (VNode-based, no DOM)
+#   - Components return VNode trees testable without a browser
+# ---------------------------------------------------------------------------
+
+TASKS["ts-counter"] = TournamentTask(
+    id="ts-counter",
+    name="Counter",
+    lang="typescript",
+    description=(
+        "A simple Counter class with get/set value, increment, decrement, "
+        "and reset. Constructor takes optional initial value (default 0)."
+    ),
+    expected_class="Counter",
+    methods=[
+        "constructor(initial?: number)",
+        "get value(): number",
+        "increment(n?: number): number",
+        "decrement(n?: number): number",
+        "reset(): void",
+    ],
+    tests=[
+        ("basic_value", textwrap.dedent("""\
+            const c = new Counter();
+            assert.equal(c.value, 0);
+        """)),
+        ("initial_value", textwrap.dedent("""\
+            const c = new Counter(10);
+            assert.equal(c.value, 10);
+        """)),
+        ("increment", textwrap.dedent("""\
+            const c = new Counter();
+            assert.equal(c.increment(), 1);
+            assert.equal(c.increment(5), 6);
+        """)),
+        ("decrement", textwrap.dedent("""\
+            const c = new Counter(10);
+            assert.equal(c.decrement(), 9);
+            assert.equal(c.decrement(4), 5);
+        """)),
+        ("reset", textwrap.dedent("""\
+            const c = new Counter(5);
+            c.increment(10);
+            c.reset();
+            assert.equal(c.value, 5);
+        """)),
+    ],
+    base_difficulty=8,
+    spec_clarity=85,
+)
+
+TASKS["ts-stack"] = TournamentTask(
+    id="ts-stack",
+    name="TypedStack",
+    lang="typescript",
+    description=(
+        "A generic Stack<T> class with push, pop, peek, isEmpty, size, "
+        "toArray, and clear. Pop/peek on empty stack throw an Error."
+    ),
+    expected_class="Stack",
+    methods=[
+        "push(item: T): void",
+        "pop(): T",
+        "peek(): T",
+        "isEmpty(): boolean",
+        "size(): number",
+        "toArray(): T[]",
+        "clear(): void",
+    ],
+    tests=[
+        ("push_pop", textwrap.dedent("""\
+            const s = new Stack<number>();
+            s.push(1);
+            s.push(2);
+            assert.equal(s.pop(), 2);
+            assert.equal(s.pop(), 1);
+        """)),
+        ("peek", textwrap.dedent("""\
+            const s = new Stack<string>();
+            s.push("a");
+            s.push("b");
+            assert.equal(s.peek(), "b");
+            assert.equal(s.size(), 2);
+        """)),
+        ("empty_throw", textwrap.dedent("""\
+            const s = new Stack<number>();
+            assert.throws(() => s.pop());
+            assert.throws(() => s.peek());
+        """)),
+        ("to_array", textwrap.dedent("""\
+            const s = new Stack<number>();
+            s.push(1); s.push(2); s.push(3);
+            assert.deepEqual(s.toArray(), [1, 2, 3]);
+        """)),
+        ("clear", textwrap.dedent("""\
+            const s = new Stack<number>();
+            s.push(1); s.push(2);
+            s.clear();
+            assert.equal(s.isEmpty(), true);
+            assert.equal(s.size(), 0);
+        """)),
+    ],
+    base_difficulty=12,
+    spec_clarity=85,
+)
+
+TASKS["tsx-greeting"] = TournamentTask(
+    id="tsx-greeting",
+    name="Greeting",
+    lang="typescript",
+    description=(
+        "A React-style JSX component that renders a greeting. "
+        "Props: name (string), optional greeting (string, default 'Hello'). "
+        "Returns a <div> with className 'greeting' containing '{greeting}, {name}!'. "
+        "Use JSX syntax: <div className=\"greeting\">{greeting}, {name}!</div>"
+    ),
+    expected_class="Greeting",
+    methods=["Greeting({ name, greeting? }: GreetingProps): VNode"],
+    tests=[
+        ("default_greeting", textwrap.dedent("""\
+            const node = <Greeting name="World" />;
+            const rendered = (node.type as Function)(node.props);
+            assert.equal(rendered.type, "div");
+            assert.equal(rendered.props.className, "greeting");
+            assert.ok(rendered.children.some((c: any) => String(c).includes("World")));
+        """)),
+        ("custom_greeting", textwrap.dedent("""\
+            const node = <Greeting name="Alice" greeting="Hi" />;
+            const rendered = (node.type as Function)(node.props);
+            assert.ok(rendered.children.some((c: any) => String(c).includes("Hi")));
+            assert.ok(rendered.children.some((c: any) => String(c).includes("Alice")));
+        """)),
+    ],
+    base_difficulty=15,
+    spec_clarity=85,
+)
+
+TASKS["tsx-toggle-button"] = TournamentTask(
+    id="tsx-toggle-button",
+    name="ToggleButton",
+    lang="typescript",
+    description=(
+        "A ToggleButton class that manages on/off state and renders as a JSX "
+        "button element. Constructor takes optional initial state (default false). "
+        "Methods: toggle(), isOn(), render(). render() returns JSX: "
+        "<button className={isOn ? 'active' : 'inactive'}>{isOn ? 'ON' : 'OFF'}</button>"
+    ),
+    expected_class="ToggleButton",
+    methods=[
+        "constructor(initial?: boolean)",
+        "toggle(): boolean",
+        "isOn(): boolean",
+        "render(): VNode",
+    ],
+    tests=[
+        ("default_off", textwrap.dedent("""\
+            const btn = new ToggleButton();
+            assert.equal(btn.isOn(), false);
+            const node = btn.render();
+            assert.equal(node.type, "button");
+            assert.equal(node.props.className, "inactive");
+        """)),
+        ("toggle_on", textwrap.dedent("""\
+            const btn = new ToggleButton();
+            btn.toggle();
+            assert.equal(btn.isOn(), true);
+            const node = btn.render();
+            assert.equal(node.props.className, "active");
+            assert.ok(node.children.includes("ON"));
+        """)),
+        ("toggle_twice", textwrap.dedent("""\
+            const btn = new ToggleButton();
+            btn.toggle();
+            btn.toggle();
+            assert.equal(btn.isOn(), false);
+        """)),
+        ("initial_on", textwrap.dedent("""\
+            const btn = new ToggleButton(true);
+            assert.equal(btn.isOn(), true);
+            const node = btn.render();
+            assert.equal(node.props.className, "active");
+        """)),
+    ],
+    base_difficulty=20,
+    spec_clarity=85,
+)
+
+TASKS["ts-event-emitter"] = TournamentTask(
+    id="ts-event-emitter",
+    name="EventEmitter",
+    lang="typescript",
+    description=(
+        "A typed EventEmitter<T extends Record<string, any[]>>. "
+        "Methods: on(event, handler), off(event, handler), emit(event, ...args), "
+        "once(event, handler), listenerCount(event). "
+        "Handlers are called in registration order. "
+        "once() handlers auto-remove after first call."
+    ),
+    expected_class="EventEmitter",
+    methods=[
+        "on(event: string, handler: Function): void",
+        "off(event: string, handler: Function): void",
+        "emit(event: string, ...args: any[]): void",
+        "once(event: string, handler: Function): void",
+        "listenerCount(event: string): number",
+    ],
+    tests=[
+        ("basic_emit", textwrap.dedent("""\
+            const ee = new EventEmitter();
+            const results: string[] = [];
+            ee.on("test", (msg: string) => results.push(msg));
+            ee.emit("test", "hello");
+            assert.deepEqual(results, ["hello"]);
+        """)),
+        ("multiple_handlers", textwrap.dedent("""\
+            const ee = new EventEmitter();
+            const results: number[] = [];
+            ee.on("x", () => results.push(1));
+            ee.on("x", () => results.push(2));
+            ee.emit("x");
+            assert.deepEqual(results, [1, 2]);
+        """)),
+        ("off_removes", textwrap.dedent("""\
+            const ee = new EventEmitter();
+            const results: string[] = [];
+            const handler = (s: string) => results.push(s);
+            ee.on("e", handler);
+            ee.emit("e", "a");
+            ee.off("e", handler);
+            ee.emit("e", "b");
+            assert.deepEqual(results, ["a"]);
+        """)),
+        ("once_fires_once", textwrap.dedent("""\
+            const ee = new EventEmitter();
+            let count = 0;
+            ee.once("ping", () => count++);
+            ee.emit("ping");
+            ee.emit("ping");
+            assert.equal(count, 1);
+        """)),
+        ("listener_count", textwrap.dedent("""\
+            const ee = new EventEmitter();
+            ee.on("a", () => {});
+            ee.on("a", () => {});
+            assert.equal(ee.listenerCount("a"), 2);
+            assert.equal(ee.listenerCount("b"), 0);
+        """)),
+    ],
+    base_difficulty=30,
+    spec_clarity=85,
+)
+
+TASKS["tsx-todo-list"] = TournamentTask(
+    id="tsx-todo-list",
+    name="TodoList",
+    lang="typescript",
+    description=(
+        "A TodoList class that manages todo items and renders as JSX. "
+        "Each item has id (auto-increment), text (string), done (boolean). "
+        "Methods: add(text) returns id, toggle(id), remove(id), "
+        "getItems() returns array, render() returns JSX. "
+        "render() returns <ul className='todo-list'> with <li> per item. "
+        "Done items get className='done', others get className='pending'. "
+        "Each <li> contains the text."
+    ),
+    expected_class="TodoList",
+    methods=[
+        "add(text: string): number",
+        "toggle(id: number): void",
+        "remove(id: number): void",
+        "getItems(): Array<{id: number, text: string, done: boolean}>",
+        "render(): VNode",
+    ],
+    tests=[
+        ("add_items", textwrap.dedent("""\
+            const t = new TodoList();
+            const id1 = t.add("Buy milk");
+            const id2 = t.add("Walk dog");
+            assert.equal(t.getItems().length, 2);
+            assert.notEqual(id1, id2);
+        """)),
+        ("toggle_done", textwrap.dedent("""\
+            const t = new TodoList();
+            const id = t.add("Test");
+            assert.equal(t.getItems()[0].done, false);
+            t.toggle(id);
+            assert.equal(t.getItems()[0].done, true);
+            t.toggle(id);
+            assert.equal(t.getItems()[0].done, false);
+        """)),
+        ("remove", textwrap.dedent("""\
+            const t = new TodoList();
+            const id1 = t.add("A");
+            const id2 = t.add("B");
+            t.remove(id1);
+            assert.equal(t.getItems().length, 1);
+            assert.equal(t.getItems()[0].text, "B");
+        """)),
+        ("render_structure", textwrap.dedent("""\
+            const t = new TodoList();
+            t.add("Item 1");
+            t.add("Item 2");
+            t.toggle(t.getItems()[0].id);
+            const node = t.render();
+            assert.equal(node.type, "ul");
+            assert.equal(node.props.className, "todo-list");
+            assert.equal(node.children.length, 2);
+            assert.equal(node.children[0].type, "li");
+            assert.equal(node.children[0].props.className, "done");
+            assert.equal(node.children[1].props.className, "pending");
+        """)),
+    ],
+    base_difficulty=35,
+    spec_clarity=85,
+)
+
+TASKS["ts-result-type"] = TournamentTask(
+    id="ts-result-type",
+    name="Result",
+    lang="typescript",
+    description=(
+        "A Result<T, E> type (like Rust's Result) implemented as a class. "
+        "Static constructors: Result.ok(value), Result.err(error). "
+        "Methods: isOk(), isErr(), unwrap() (throws if Err), "
+        "unwrapOr(default), map(fn), flatMap(fn), mapErr(fn). "
+        "map/flatMap only apply to Ok values; mapErr only to Err values."
+    ),
+    expected_class="Result",
+    methods=[
+        "static ok<T>(value: T): Result<T, never>",
+        "static err<E>(error: E): Result<never, E>",
+        "isOk(): boolean",
+        "isErr(): boolean",
+        "unwrap(): T",
+        "unwrapOr(defaultValue: T): T",
+        "map<U>(fn: (val: T) => U): Result<U, E>",
+        "flatMap<U>(fn: (val: T) => Result<U, E>): Result<U, E>",
+        "mapErr<F>(fn: (err: E) => F): Result<T, F>",
+    ],
+    tests=[
+        ("ok_basic", textwrap.dedent("""\
+            const r = Result.ok(42);
+            assert.equal(r.isOk(), true);
+            assert.equal(r.isErr(), false);
+            assert.equal(r.unwrap(), 42);
+        """)),
+        ("err_basic", textwrap.dedent("""\
+            const r = Result.err("oops");
+            assert.equal(r.isOk(), false);
+            assert.equal(r.isErr(), true);
+            assert.throws(() => r.unwrap());
+        """)),
+        ("unwrap_or", textwrap.dedent("""\
+            assert.equal(Result.ok(5).unwrapOr(0), 5);
+            assert.equal(Result.err("x").unwrapOr(0), 0);
+        """)),
+        ("map_ok", textwrap.dedent("""\
+            const r = Result.ok(3).map(x => x * 2);
+            assert.equal(r.unwrap(), 6);
+        """)),
+        ("map_err_passthrough", textwrap.dedent("""\
+            const r = Result.err("fail").map((x: number) => x * 2);
+            assert.equal(r.isErr(), true);
+            assert.throws(() => r.unwrap());
+        """)),
+        ("flat_map", textwrap.dedent("""\
+            const divide = (n: number): Result<number, string> =>
+                n === 0 ? Result.err("div by zero") : Result.ok(10 / n);
+            assert.equal(Result.ok(2).flatMap(divide).unwrap(), 5);
+            assert.equal(Result.ok(0).flatMap(divide).isErr(), true);
+        """)),
+        ("map_err", textwrap.dedent("""\
+            const r = Result.err("bad").mapErr(e => e.toUpperCase());
+            assert.equal(r.isErr(), true);
+            assert.throws(() => r.unwrap());
+        """)),
+    ],
+    base_difficulty=40,
+    spec_clarity=85,
+)
+
+TASKS["tsx-data-table"] = TournamentTask(
+    id="tsx-data-table",
+    name="DataTable",
+    lang="typescript",
+    description=(
+        "A DataTable class that manages tabular data and renders as JSX. "
+        "Constructor takes columns (string[]) and rows (string[][]). "
+        "Methods: addRow(row), removeRow(index), sortBy(column, asc?), "
+        "filter(column, value), getRows(), render(). "
+        "render() returns <table> with <thead>/<tbody>. "
+        "Header cells are <th>, data cells are <td>. "
+        "Each <tr> in tbody has the row data as <td> children."
+    ),
+    expected_class="DataTable",
+    methods=[
+        "constructor(columns: string[], rows?: string[][])",
+        "addRow(row: string[]): void",
+        "removeRow(index: number): void",
+        "sortBy(column: string, ascending?: boolean): void",
+        "filter(column: string, value: string): DataTable",
+        "getRows(): string[][]",
+        "render(): VNode",
+    ],
+    tests=[
+        ("basic_render", textwrap.dedent("""\
+            const dt = new DataTable(["Name", "Age"], [["Alice", "30"], ["Bob", "25"]]);
+            const node = dt.render();
+            assert.equal(node.type, "table");
+            const thead = node.children.find((c: any) => c.type === "thead");
+            const tbody = node.children.find((c: any) => c.type === "tbody");
+            assert.ok(thead);
+            assert.ok(tbody);
+            assert.equal(tbody.children.length, 2);
+        """)),
+        ("add_remove", textwrap.dedent("""\
+            const dt = new DataTable(["X"], [["1"]]);
+            dt.addRow(["2"]);
+            assert.equal(dt.getRows().length, 2);
+            dt.removeRow(0);
+            assert.deepEqual(dt.getRows(), [["2"]]);
+        """)),
+        ("sort_ascending", textwrap.dedent("""\
+            const dt = new DataTable(["Name"], [["Charlie"], ["Alice"], ["Bob"]]);
+            dt.sortBy("Name", true);
+            assert.deepEqual(dt.getRows().map(r => r[0]), ["Alice", "Bob", "Charlie"]);
+        """)),
+        ("sort_descending", textwrap.dedent("""\
+            const dt = new DataTable(["N"], [["1"], ["3"], ["2"]]);
+            dt.sortBy("N", false);
+            assert.deepEqual(dt.getRows().map(r => r[0]), ["3", "2", "1"]);
+        """)),
+        ("filter_returns_new", textwrap.dedent("""\
+            const dt = new DataTable(["Color"], [["Red"], ["Blue"], ["Red"]]);
+            const filtered = dt.filter("Color", "Red");
+            assert.equal(filtered.getRows().length, 2);
+            assert.equal(dt.getRows().length, 3);
+        """)),
+        ("header_cells", textwrap.dedent("""\
+            const dt = new DataTable(["A", "B"], []);
+            const node = dt.render();
+            const thead = node.children.find((c: any) => c.type === "thead");
+            const headerRow = thead.children[0];
+            assert.equal(headerRow.children.length, 2);
+            assert.equal(headerRow.children[0].type, "th");
+        """)),
+    ],
+    base_difficulty=45,
+    spec_clarity=85,
+)
+
+TASKS["ts-observable"] = TournamentTask(
+    id="ts-observable",
+    name="Observable",
+    lang="typescript",
+    description=(
+        "A simple Observable<T> with subscribe, unsubscribe, and pipe. "
+        "Constructor takes a subscriber function: (observer: Observer<T>) => void. "
+        "Observer has next(value), error(err), complete() methods. "
+        "subscribe(observer) calls the subscriber and returns an Unsubscribe function. "
+        "Static methods: Observable.of(...values), Observable.from(array). "
+        "pipe(operator) returns new Observable. "
+        "Implement map and filter operators as standalone functions that return operators."
+    ),
+    expected_class="Observable",
+    methods=[
+        "constructor(subscriber: (observer: Observer<T>) => void)",
+        "subscribe(observer: Partial<Observer<T>>): () => void",
+        "pipe<U>(operator: (source: Observable<T>) => Observable<U>): Observable<U>",
+        "static of<T>(...values: T[]): Observable<T>",
+        "static from<T>(array: T[]): Observable<T>",
+    ],
+    tests=[
+        ("of_emits", textwrap.dedent("""\
+            const values: number[] = [];
+            Observable.of(1, 2, 3).subscribe({ next: v => values.push(v) });
+            assert.deepEqual(values, [1, 2, 3]);
+        """)),
+        ("from_array", textwrap.dedent("""\
+            const values: string[] = [];
+            Observable.from(["a", "b"]).subscribe({ next: v => values.push(v) });
+            assert.deepEqual(values, ["a", "b"]);
+        """)),
+        ("unsubscribe", textwrap.dedent("""\
+            let count = 0;
+            const obs = new Observable<number>((observer) => {
+                observer.next(1);
+                observer.next(2);
+            });
+            const unsub = obs.subscribe({ next: () => count++ });
+            assert.equal(count, 2);
+        """)),
+        ("map_operator", textwrap.dedent("""\
+            const values: number[] = [];
+            Observable.of(1, 2, 3)
+                .pipe(map((x: number) => x * 10))
+                .subscribe({ next: v => values.push(v) });
+            assert.deepEqual(values, [10, 20, 30]);
+        """)),
+        ("filter_operator", textwrap.dedent("""\
+            const values: number[] = [];
+            Observable.of(1, 2, 3, 4)
+                .pipe(filter((x: number) => x % 2 === 0))
+                .subscribe({ next: v => values.push(v) });
+            assert.deepEqual(values, [2, 4]);
+        """)),
+        ("pipe_chain", textwrap.dedent("""\
+            const values: string[] = [];
+            Observable.of(1, 2, 3, 4, 5)
+                .pipe(filter((x: number) => x > 2))
+                .pipe(map((x: number) => `v${x}`))
+                .subscribe({ next: v => values.push(v) });
+            assert.deepEqual(values, ["v3", "v4", "v5"]);
+        """)),
+        ("error_handler", textwrap.dedent("""\
+            let caught = "";
+            new Observable<number>((obs) => {
+                obs.next(1);
+                obs.error("boom");
+                obs.next(2);
+            }).subscribe({
+                next: () => {},
+                error: e => { caught = e; },
+            });
+            assert.equal(caught, "boom");
+        """)),
+    ],
+    base_difficulty=55,
+    spec_clarity=85,
+)
+
+TASKS["tsx-form-builder"] = TournamentTask(
+    id="tsx-form-builder",
+    name="FormBuilder",
+    lang="typescript",
+    description=(
+        "A FormBuilder that constructs validated forms and renders them as JSX. "
+        "Builder pattern: addField(name, type, options?) returns this. "
+        "Types: 'text', 'number', 'email', 'select'. "
+        "Options: { required?: boolean, min?: number, max?: number, "
+        "choices?: string[], pattern?: RegExp }. "
+        "validate(data) returns { valid: boolean, errors: Record<string, string> }. "
+        "render() returns <form> with <div className='field'> per field, "
+        "each containing <label> and <input> (or <select> with <option>s)."
+    ),
+    expected_class="FormBuilder",
+    methods=[
+        "addField(name: string, type: string, options?: FieldOptions): this",
+        "validate(data: Record<string, any>): ValidationResult",
+        "render(): VNode",
+    ],
+    tests=[
+        ("add_fields", textwrap.dedent("""\
+            const fb = new FormBuilder()
+                .addField("name", "text", { required: true })
+                .addField("age", "number", { min: 0, max: 150 });
+            const node = fb.render();
+            assert.equal(node.type, "form");
+            assert.equal(node.children.length, 2);
+        """)),
+        ("validate_required", textwrap.dedent("""\
+            const fb = new FormBuilder()
+                .addField("name", "text", { required: true });
+            const r1 = fb.validate({});
+            assert.equal(r1.valid, false);
+            assert.ok(r1.errors["name"]);
+            const r2 = fb.validate({ name: "Alice" });
+            assert.equal(r2.valid, true);
+        """)),
+        ("validate_number_range", textwrap.dedent("""\
+            const fb = new FormBuilder()
+                .addField("age", "number", { min: 0, max: 150 });
+            assert.equal(fb.validate({ age: 25 }).valid, true);
+            assert.equal(fb.validate({ age: -1 }).valid, false);
+            assert.equal(fb.validate({ age: 200 }).valid, false);
+        """)),
+        ("validate_email", textwrap.dedent("""\
+            const fb = new FormBuilder()
+                .addField("email", "email", { required: true });
+            assert.equal(fb.validate({ email: "a@b.com" }).valid, true);
+            assert.equal(fb.validate({ email: "notanemail" }).valid, false);
+        """)),
+        ("select_render", textwrap.dedent("""\
+            const fb = new FormBuilder()
+                .addField("color", "select", { choices: ["red", "blue"] });
+            const node = fb.render();
+            const field = node.children[0];
+            const select = field.children.find((c: any) => c.type === "select");
+            assert.ok(select);
+            assert.equal(select.children.length, 2);
+            assert.equal(select.children[0].type, "option");
+        """)),
+        ("render_labels", textwrap.dedent("""\
+            const fb = new FormBuilder()
+                .addField("username", "text");
+            const node = fb.render();
+            const field = node.children[0];
+            const label = field.children.find((c: any) => c.type === "label");
+            assert.ok(label);
+        """)),
+    ],
+    base_difficulty=50,
+    spec_clarity=85,
+)
+
+TASKS["ts-state-machine"] = TournamentTask(
+    id="ts-state-machine",
+    name="StateMachine",
+    lang="typescript",
+    description=(
+        "A generic finite state machine. Constructor takes initial state. "
+        "addTransition(from, event, to, guard?) defines allowed transitions. "
+        "Optional guard is a function returning boolean. "
+        "send(event) transitions if allowed, throws if not. "
+        "onEnter(state, handler) and onExit(state, handler) register hooks. "
+        "current returns current state. history() returns array of past states. "
+        "can(event) returns boolean. getTransitions() returns valid events from current."
+    ),
+    expected_class="StateMachine",
+    methods=[
+        "constructor(initial: string)",
+        "addTransition(from: string, event: string, to: string, guard?: () => boolean): this",
+        "send(event: string): string",
+        "onEnter(state: string, handler: () => void): this",
+        "onExit(state: string, handler: () => void): this",
+        "get current(): string",
+        "history(): string[]",
+        "can(event: string): boolean",
+        "getTransitions(): string[]",
+    ],
+    tests=[
+        ("basic_transition", textwrap.dedent("""\
+            const sm = new StateMachine("idle");
+            sm.addTransition("idle", "start", "running");
+            sm.send("start");
+            assert.equal(sm.current, "running");
+        """)),
+        ("invalid_transition", textwrap.dedent("""\
+            const sm = new StateMachine("idle");
+            sm.addTransition("idle", "start", "running");
+            assert.throws(() => sm.send("stop"));
+        """)),
+        ("guard_blocks", textwrap.dedent("""\
+            let ready = false;
+            const sm = new StateMachine("idle");
+            sm.addTransition("idle", "go", "active", () => ready);
+            assert.throws(() => sm.send("go"));
+            ready = true;
+            sm.send("go");
+            assert.equal(sm.current, "active");
+        """)),
+        ("enter_exit_hooks", textwrap.dedent("""\
+            const log: string[] = [];
+            const sm = new StateMachine("a");
+            sm.onExit("a", () => log.push("exit-a"));
+            sm.onEnter("b", () => log.push("enter-b"));
+            sm.addTransition("a", "go", "b");
+            sm.send("go");
+            assert.deepEqual(log, ["exit-a", "enter-b"]);
+        """)),
+        ("history_tracking", textwrap.dedent("""\
+            const sm = new StateMachine("a");
+            sm.addTransition("a", "next", "b");
+            sm.addTransition("b", "next", "c");
+            sm.send("next");
+            sm.send("next");
+            assert.deepEqual(sm.history(), ["a", "b", "c"]);
+        """)),
+        ("can_check", textwrap.dedent("""\
+            const sm = new StateMachine("idle");
+            sm.addTransition("idle", "start", "running");
+            sm.addTransition("running", "stop", "idle");
+            assert.equal(sm.can("start"), true);
+            assert.equal(sm.can("stop"), false);
+        """)),
+        ("get_transitions", textwrap.dedent("""\
+            const sm = new StateMachine("a");
+            sm.addTransition("a", "go", "b");
+            sm.addTransition("a", "skip", "c");
+            const events = sm.getTransitions();
+            assert.deepEqual(events.sort(), ["go", "skip"]);
+        """)),
+    ],
+    base_difficulty=55,
+    spec_clarity=85,
+)
+
+TASKS["tsx-virtual-list"] = TournamentTask(
+    id="tsx-virtual-list",
+    name="VirtualList",
+    lang="typescript",
+    description=(
+        "A VirtualList component that renders only visible items for performance. "
+        "Constructor takes: items (any[]), itemHeight (number), viewportHeight (number). "
+        "Methods: scrollTo(offset), getVisibleRange(), render(). "
+        "render() returns <div className='virtual-list' style={{height, overflow:'auto'}}> "
+        "containing <div className='spacer' style={{height: totalHeight}}> "
+        "with only the visible <div className='item' style={{position:'absolute', top}}> "
+        "children. Each item div contains renderItem(item, index) result."
+    ),
+    expected_class="VirtualList",
+    methods=[
+        "constructor(items: any[], itemHeight: number, viewportHeight: number)",
+        "scrollTo(offset: number): void",
+        "getVisibleRange(): { start: number, end: number }",
+        "render(): VNode",
+    ],
+    tests=[
+        ("visible_range_initial", textwrap.dedent("""\
+            const vl = new VirtualList(
+                Array.from({length: 100}, (_, i) => i),
+                40, 200
+            );
+            const range = vl.getVisibleRange();
+            assert.equal(range.start, 0);
+            assert.ok(range.end <= 6);
+        """)),
+        ("scroll_changes_range", textwrap.dedent("""\
+            const vl = new VirtualList(
+                Array.from({length: 100}, (_, i) => i),
+                40, 200
+            );
+            vl.scrollTo(400);
+            const range = vl.getVisibleRange();
+            assert.equal(range.start, 10);
+        """)),
+        ("render_structure", textwrap.dedent("""\
+            const vl = new VirtualList(["a", "b", "c"], 40, 200);
+            const node = vl.render();
+            assert.equal(node.type, "div");
+            assert.equal(node.props.className, "virtual-list");
+        """)),
+        ("only_visible_rendered", textwrap.dedent("""\
+            const items = Array.from({length: 1000}, (_, i) => `item-${i}`);
+            const vl = new VirtualList(items, 40, 200);
+            const node = vl.render();
+            const spacer = node.children.find((c: any) => c.props?.className === "spacer");
+            assert.ok(spacer);
+            const rendered = spacer.children.filter((c: any) => c.props?.className === "item");
+            assert.ok(rendered.length < 10);
+            assert.ok(rendered.length > 0);
+        """)),
+        ("scroll_clamp", textwrap.dedent("""\
+            const vl = new VirtualList(["a", "b"], 40, 200);
+            vl.scrollTo(-100);
+            assert.equal(vl.getVisibleRange().start, 0);
+            vl.scrollTo(999999);
+            const range = vl.getVisibleRange();
+            assert.ok(range.start <= 2);
+        """)),
+    ],
+    base_difficulty=60,
+    spec_clarity=85,
+)
+
+TASKS["ts-async-queue"] = TournamentTask(
+    id="ts-async-queue",
+    name="AsyncQueue",
+    lang="typescript",
+    description=(
+        "A concurrency-limited async task queue. Constructor takes concurrency limit. "
+        "add(fn) adds an async function to the queue, returns a Promise for its result. "
+        "Tasks run up to the concurrency limit simultaneously. "
+        "size returns pending + running count. pending returns waiting count. "
+        "onIdle() returns a Promise that resolves when queue is empty and all done. "
+        "pause() and resume() control execution. clear() removes pending tasks."
+    ),
+    expected_class="AsyncQueue",
+    methods=[
+        "constructor(concurrency: number)",
+        "add<T>(fn: () => Promise<T>): Promise<T>",
+        "get size(): number",
+        "get pending(): number",
+        "onIdle(): Promise<void>",
+        "pause(): void",
+        "resume(): void",
+        "clear(): void",
+    ],
+    tests=[
+        ("basic_execution", textwrap.dedent("""\
+            const q = new AsyncQueue(2);
+            const r1 = q.add(() => Promise.resolve(1));
+            const r2 = q.add(() => Promise.resolve(2));
+            assert.equal(await r1, 1);
+            assert.equal(await r2, 2);
+        """)),
+        ("concurrency_limit", textwrap.dedent("""\
+            let running = 0; let maxRunning = 0;
+            const q = new AsyncQueue(2);
+            const task = () => new Promise<void>(r => {
+                running++;
+                maxRunning = Math.max(maxRunning, running);
+                setTimeout(() => { running--; r(); }, 10);
+            });
+            await Promise.all([q.add(task), q.add(task), q.add(task)]);
+            assert.ok(maxRunning <= 2, `max was ${maxRunning}`);
+        """)),
+        ("on_idle", textwrap.dedent("""\
+            const q = new AsyncQueue(1);
+            q.add(() => Promise.resolve());
+            q.add(() => Promise.resolve());
+            await q.onIdle();
+            assert.equal(q.size, 0);
+        """)),
+        ("pause_resume", textwrap.dedent("""\
+            const results: number[] = [];
+            const q = new AsyncQueue(1);
+            q.pause();
+            q.add(async () => { results.push(1); });
+            await new Promise(r => setTimeout(r, 30));
+            assert.equal(results.length, 0);
+            q.resume();
+            await q.onIdle();
+            assert.deepEqual(results, [1]);
+        """)),
+        ("clear_pending", textwrap.dedent("""\
+            const q = new AsyncQueue(1);
+            const slow = () => new Promise(r => setTimeout(r, 50));
+            q.add(slow);
+            q.add(slow);
+            q.add(slow);
+            q.clear();
+            assert.equal(q.pending, 0);
+        """)),
+    ],
+    base_difficulty=65,
+    spec_clarity=85,
+)
+
+TASKS["ts-schema-validator"] = TournamentTask(
+    id="ts-schema-validator",
+    name="SchemaValidator",
+    lang="typescript",
+    description=(
+        "A Zod-inspired schema validator using a builder/chaining pattern. "
+        "z.string(), z.number(), z.boolean(), z.array(schema), z.object({...}). "
+        "String: min(n), max(n), email(). Number: min(n), max(n), int(). "
+        "All schemas have parse(value) that returns the value or throws, "
+        "and safeParse(value) that returns { success: boolean, data?, error? }. "
+        "z.object() validates nested objects. z.array() validates each element."
+    ),
+    expected_class="z",
+    methods=[
+        "z.string(): StringSchema",
+        "z.number(): NumberSchema",
+        "z.boolean(): BoolSchema",
+        "z.array(schema: Schema): ArraySchema",
+        "z.object(shape: Record<string, Schema>): ObjectSchema",
+        "parse(value: unknown): T",
+        "safeParse(value: unknown): { success: boolean, data?: T, error?: string }",
+    ],
+    tests=[
+        ("string_basic", textwrap.dedent("""\
+            const s = z.string();
+            assert.equal(s.parse("hello"), "hello");
+            assert.throws(() => s.parse(42));
+        """)),
+        ("string_constraints", textwrap.dedent("""\
+            const s = z.string().min(2).max(5);
+            assert.equal(s.parse("abc"), "abc");
+            assert.throws(() => s.parse("a"));
+            assert.throws(() => s.parse("abcdef"));
+        """)),
+        ("number_int", textwrap.dedent("""\
+            const n = z.number().int().min(0);
+            assert.equal(n.parse(5), 5);
+            assert.throws(() => n.parse(1.5));
+            assert.throws(() => n.parse(-1));
+        """)),
+        ("boolean", textwrap.dedent("""\
+            assert.equal(z.boolean().parse(true), true);
+            assert.throws(() => z.boolean().parse("true"));
+        """)),
+        ("array", textwrap.dedent("""\
+            const a = z.array(z.number());
+            assert.deepEqual(a.parse([1, 2, 3]), [1, 2, 3]);
+            assert.throws(() => a.parse([1, "two"]));
+        """)),
+        ("object_nested", textwrap.dedent("""\
+            const schema = z.object({
+                name: z.string().min(1),
+                age: z.number().min(0),
+            });
+            const data = schema.parse({ name: "Alice", age: 30 });
+            assert.equal(data.name, "Alice");
+            assert.throws(() => schema.parse({ name: "", age: 30 }));
+        """)),
+        ("safe_parse", textwrap.dedent("""\
+            const s = z.string();
+            const r1 = s.safeParse("ok");
+            assert.equal(r1.success, true);
+            assert.equal(r1.data, "ok");
+            const r2 = s.safeParse(42);
+            assert.equal(r2.success, false);
+            assert.ok(r2.error);
+        """)),
+        ("email_validation", textwrap.dedent("""\
+            const email = z.string().email();
+            assert.equal(email.parse("a@b.com"), "a@b.com");
+            assert.throws(() => email.parse("not-an-email"));
+        """)),
+    ],
+    base_difficulty=70,
+    spec_clarity=85,
+)
+
+TASKS["ts-ecs"] = TournamentTask(
+    id="ts-ecs",
+    name="ECS",
+    lang="typescript",
+    description=(
+        "An Entity-Component-System framework. "
+        "World is the main container. createEntity() returns a numeric id. "
+        "addComponent(entity, componentName, data) attaches data to entity. "
+        "getComponent(entity, componentName) returns data or undefined. "
+        "removeComponent(entity, componentName). "
+        "query(...componentNames) returns array of entity ids that have ALL listed components. "
+        "addSystem(name, requiredComponents, updateFn) registers a system. "
+        "update() calls each system's updateFn with matching entities. "
+        "destroyEntity(entity) removes entity and all its components."
+    ),
+    expected_class="World",
+    methods=[
+        "createEntity(): number",
+        "addComponent(entity: number, name: string, data: any): void",
+        "getComponent(entity: number, name: string): any",
+        "removeComponent(entity: number, name: string): void",
+        "query(...components: string[]): number[]",
+        "addSystem(name: string, required: string[], fn: (entities: number[], world: World) => void): void",
+        "update(): void",
+        "destroyEntity(entity: number): void",
+    ],
+    tests=[
+        ("create_entity", textwrap.dedent("""\
+            const w = new World();
+            const e1 = w.createEntity();
+            const e2 = w.createEntity();
+            assert.notEqual(e1, e2);
+        """)),
+        ("add_get_component", textwrap.dedent("""\
+            const w = new World();
+            const e = w.createEntity();
+            w.addComponent(e, "position", { x: 10, y: 20 });
+            const pos = w.getComponent(e, "position");
+            assert.equal(pos.x, 10);
+            assert.equal(pos.y, 20);
+        """)),
+        ("query_entities", textwrap.dedent("""\
+            const w = new World();
+            const e1 = w.createEntity();
+            const e2 = w.createEntity();
+            const e3 = w.createEntity();
+            w.addComponent(e1, "pos", {});
+            w.addComponent(e1, "vel", {});
+            w.addComponent(e2, "pos", {});
+            w.addComponent(e3, "vel", {});
+            const result = w.query("pos", "vel");
+            assert.deepEqual(result, [e1]);
+        """)),
+        ("system_update", textwrap.dedent("""\
+            const w = new World();
+            const e = w.createEntity();
+            w.addComponent(e, "counter", { value: 0 });
+            w.addSystem("increment", ["counter"], (entities, world) => {
+                for (const eid of entities) {
+                    const c = world.getComponent(eid, "counter");
+                    c.value++;
+                }
+            });
+            w.update();
+            w.update();
+            assert.equal(w.getComponent(e, "counter").value, 2);
+        """)),
+        ("destroy_entity", textwrap.dedent("""\
+            const w = new World();
+            const e = w.createEntity();
+            w.addComponent(e, "hp", { value: 100 });
+            w.destroyEntity(e);
+            assert.equal(w.getComponent(e, "hp"), undefined);
+            assert.deepEqual(w.query("hp"), []);
+        """)),
+        ("remove_component", textwrap.dedent("""\
+            const w = new World();
+            const e = w.createEntity();
+            w.addComponent(e, "a", {});
+            w.addComponent(e, "b", {});
+            w.removeComponent(e, "a");
+            assert.equal(w.getComponent(e, "a"), undefined);
+            assert.ok(w.getComponent(e, "b") !== undefined);
+        """)),
+    ],
+    base_difficulty=65,
+    spec_clarity=85,
+)
+
+TASKS["ts-promise-pool"] = TournamentTask(
+    id="ts-promise-pool",
+    name="PromisePool",
+    lang="typescript",
+    description=(
+        "A promise pool that processes an iterable of async task factories "
+        "with a concurrency limit, collecting results in order. "
+        "PromisePool.for(items).withConcurrency(n).process(fn) returns "
+        "Promise<{ results: T[], errors: Error[] }>. "
+        "Results array has same length as items, with undefined for failed items. "
+        "Errors array collects all failures. Processing continues on error."
+    ),
+    expected_class="PromisePool",
+    methods=[
+        "static for<T>(items: T[]): PromisePoolBuilder<T>",
+        "withConcurrency(n: number): this",
+        "process<R>(fn: (item: T) => Promise<R>): Promise<PoolResult<R>>",
+    ],
+    tests=[
+        ("basic_process", textwrap.dedent("""\
+            const { results, errors } = await PromisePool
+                .for([1, 2, 3])
+                .withConcurrency(2)
+                .process(async (n) => n * 10);
+            assert.deepEqual(results, [10, 20, 30]);
+            assert.equal(errors.length, 0);
+        """)),
+        ("preserves_order", textwrap.dedent("""\
+            const { results } = await PromisePool
+                .for([30, 10, 20])
+                .withConcurrency(3)
+                .process(async (ms) => {
+                    await new Promise(r => setTimeout(r, ms));
+                    return ms;
+                });
+            assert.deepEqual(results, [30, 10, 20]);
+        """)),
+        ("handles_errors", textwrap.dedent("""\
+            const { results, errors } = await PromisePool
+                .for([1, 2, 3])
+                .withConcurrency(1)
+                .process(async (n) => {
+                    if (n === 2) throw new Error("fail");
+                    return n;
+                });
+            assert.equal(results[0], 1);
+            assert.equal(results[2], 3);
+            assert.equal(errors.length, 1);
+        """)),
+        ("concurrency_respected", textwrap.dedent("""\
+            let running = 0; let peak = 0;
+            await PromisePool
+                .for([1, 2, 3, 4, 5])
+                .withConcurrency(2)
+                .process(async () => {
+                    running++;
+                    peak = Math.max(peak, running);
+                    await new Promise(r => setTimeout(r, 10));
+                    running--;
+                });
+            assert.ok(peak <= 2, `peak was ${peak}`);
+        """)),
+    ],
+    base_difficulty=60,
+    spec_clarity=85,
+)
 
 @dataclass
 class Contender:
