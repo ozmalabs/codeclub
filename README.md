@@ -365,8 +365,8 @@ Teach your AI agent how to use codeclub. One command. Works everywhere.
 
 | Agent | Install |
 |-------|---------|
-| **Copilot CLI** | `/mcp add codeclub -- python /path/to/codeclub/codeclub/mcp_server.py` |
-| **Claude Code** | `claude plugin install codeclub@codeclub` |
+| **Claude Code** | `claude mcp add codeclub -- uv run python -m codeclub.claude_code_mcp` |
+| **Copilot CLI** | `/mcp add codeclub -- python -m codeclub.mcp_server` |
 | **Codex** | Clone repo → `/plugins` → Install |
 | **Gemini CLI** | `gemini extensions install https://github.com/ozmalabs/codeclub` |
 | **Cursor** | `npx skills add ozmalabs/codeclub -a cursor` |
@@ -376,9 +376,56 @@ Teach your AI agent how to use codeclub. One command. Works everywhere.
 | **Any MCP client** | Add `.mcp.json` from this repo, or run `python -m codeclub.mcp_server` |
 | **Any other** | `npx skills add ozmalabs/codeclub` |
 
-### MCP server (Copilot CLI, Claude Desktop, any MCP client)
+### Claude Code
 
-The MCP server exposes seven tools over stdio:
+The Claude Code MCP server routes tasks across haiku / sonnet / opus and
+exposes the full dev loop. Five tools:
+
+| Tool | What it does |
+|------|-------------|
+| `pick_model` | Classify task → pick cheapest capable model + context strategy |
+| `classify_task` | Raw classification: difficulty, clarity, category, coordinates |
+| `compress_context` | Stub function bodies (70–95% reduction), no CJK artifacts |
+| `estimate_cost` | Side-by-side cost comparison across all three models |
+| `run_dev_loop` | Full pipeline: spec → generate → test → fix → review → report |
+
+```bash
+# Install — from the codeclub repo directory
+claude mcp add codeclub -- uv run python -m codeclub.claude_code_mcp
+```
+
+**Routing is haiku-generous.** Most single-file coding, tests, debugging, and
+standard feature work routes to haiku (1x cost). Sonnet (4x) handles
+multi-file coordination and complex debugging. Opus (19x) is reserved for
+security, distributed systems, and architecture decisions. Low clarity
+escalates one tier — vague specs need more reasoning.
+
+| Difficulty | Clarity >= 35 | Clarity < 35 |
+|---|---|---|
+| d <= 35 | haiku | sonnet |
+| 36-65 | sonnet | opus |
+| d > 65 | opus | opus |
+
+**Dev loop** runs the full codeclub pipeline inside Claude Code. Pass a
+natural language task and get back working, tested, reviewed code:
+
+```
+run_dev_loop(task="Build a RateLimiter with token bucket algorithm",
+             setup="anthropic", stack="library")
+→ { "passed": true, "approved": true, "code": "...", "report": "..." }
+```
+
+The loop uses the Anthropic API by default. Set `setup="copilot"` for
+GitHub Copilot models, `setup="best_local_first"` for local GPU + cloud
+fallback. Each run returns a cost ledger.
+
+**Context strategy** is one binary switch: if your context is over ~40k
+tokens, the tool recommends compressing before sending to the sub-agent.
+Call `compress_context` to stub function bodies down to signatures + `...`.
+
+### MCP server — generic (Copilot CLI, Claude Desktop, any MCP client)
+
+The generic MCP server exposes seven tools over stdio:
 
 | Tool | What it does |
 |------|-------------|
@@ -400,10 +447,10 @@ The MCP server exposes seven tools over stdio:
 # Workspace config — drop .mcp.json in your repo root (already included)
 ```
 
-No API keys needed. Classification and routing are pure heuristics — zero LLM calls.
+No API keys needed for routing/classification — pure heuristics, zero LLM calls.
 
-Copilot users: seed your models first — routing then knows GPT-4.1 is free (0×)
-and only escalates to Sonnet (1×) or Opus (10×) when complexity demands it.
+Copilot users: seed your models first — routing then knows GPT-4.1 is free (0x)
+and only escalates to Sonnet (1x) or Opus (10x) when complexity demands it.
 Route includes context strategy: **maximise context for Copilot** (per-prompt billing),
 compress for API (per-token billing). See [Copilot billing](docs/copilot-billing.md).
 

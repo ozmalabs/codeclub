@@ -2435,19 +2435,61 @@ def estimate_query_coords(
     elif words > 50:
         clarity += 5        # detailed spec
 
-    # Difficulty heuristics (rough baseline)
-    difficulty = 35
-    complexity_signals = [
-        "async", "concurrent", "recursive", "parser", "state machine",
-        "tree", "graph", "cache", "protocol", "distributed",
+    # Difficulty heuristics
+    # Start at 30 (baseline "simple coding task"), then adjust both ways.
+    difficulty = 30
+    desc = description.lower()
+
+    # ── Downward signals (simple/trivial tasks) ──────────────────────
+    simple_signals = [
+        "docstring", "comment", "format", "lint", "rename", "typo",
+        "type hint", "import", "boilerplate", "scaffold", "placeholder",
+        "snake_case", "camelcase", "whitespace", "indentation",
+        "move file", "delete file", "copy", "print statement",
     ]
-    for signal in complexity_signals:
-        if signal in description.lower():
-            difficulty += 5
-    if words < 20:
-        difficulty -= 10    # short = probably simple
+    simple_count = sum(1 for s in simple_signals if s in desc)
+    if simple_count:
+        difficulty -= 10 + min(simple_count - 1, 2) * 5  # -10 to -20
+
+    # ── Upward signals (complexity) ──────────────────────────────────
+    complexity_signals = [
+        # algorithms / data structures
+        ("async", 5), ("concurrent", 8), ("recursive", 5),
+        ("parser", 7), ("state machine", 8),
+        ("tree", 4), ("graph", 6), ("cache", 4),
+        # distributed / protocol
+        ("protocol", 7), ("distributed", 10), ("consensus", 12),
+        ("byzantine", 15), ("raft", 10), ("paxos", 10),
+        # security / auth
+        ("security", 8), ("vulnerabilit", 10), ("cryptograph", 12),
+        ("oauth", 8), ("pkce", 8), ("authentication", 6),
+        ("injection", 8), ("xss", 8), ("csrf", 6),
+        # architecture / design
+        ("architect", 10), ("design.*system", 8), ("design.*api", 7),
+        ("design.*model", 7), ("schema design", 8),
+        ("data model", 7), ("multi-tenant", 8),
+        ("greenfield", 8), ("migrate", 6), ("rewrite", 6),
+        # concurrency correctness
+        ("race condition", 10), ("deadlock", 10), ("lock-free", 12),
+        ("memory safety", 10),
+        # debugging complexity
+        ("intermittent", 6), ("flaky", 5), ("heisenbug", 8),
+        ("memory leak", 7), ("performance", 5),
+        # scope markers
+        ("end-to-end", 5), ("full stack", 5), ("microservice", 6),
+        ("pipeline", 4), ("infrastructure", 5),
+    ]
+    for signal, weight in complexity_signals:
+        if re.search(signal, desc):
+            difficulty += weight
+
+    # Word count adjustments
+    if words < 15:
+        difficulty -= 5     # short prompt = probably simple
     elif words > 100:
         difficulty += 10    # long spec = complex ask
+    elif words > 50:
+        difficulty += 5
 
     # Apply role offset
     defaults = ROLE_DEFAULTS.get(role, {"diff_offset": 0, "clarity": 70})
