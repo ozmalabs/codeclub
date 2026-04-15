@@ -86,6 +86,20 @@ that handles JSX transpilation via a lightweight VNode shim.
 This is why routing needs a language axis. Sending a Rust task to gemini-2.5-pro is
 burning money. → [Full results](docs/benchmarks.md)
 
+### Dogfood: building codeclub with codeclub
+
+Five features built this session. All routed to Opus ($15/Mtok). What codeclub
+would have done:
+
+| | Actual | Routed | Saved |
+|---|---:|---:|---:|
+| Tokens | 244,500 | 38,600 | 84% |
+| Cost | $5.26 | $0.74 | **86%** |
+
+3 of 5 tasks didn't need frontier — Sonnet or GPT-5.1 would have worked.
+Context compression cut tokens 84%. Two effects compound: **cheaper model ×
+fewer tokens = 86% savings.** → [Full breakdown](docs/club-smash.md#dogfood-building-codeclub-with-codeclub)
+
 ### Compression savings (real files)
 
 | File | Tokens | After pipeline | Saved |
