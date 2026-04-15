@@ -2477,6 +2477,40 @@ class RequestClassification:
     suggested_profile: str          # key into TASK_PROFILES
     signals: list[str]              # which signals fired
 
+    @property
+    def confidence_tier(self) -> str:
+        """
+        Human-readable confidence tier for routing decisions.
+
+        high (≥0.75): strong signal match, proceed without hesitation
+        medium (≥0.50): reasonable match, heuristic is probably right
+        low (≥0.35): weak signals, classification is a guess
+        uncertain (<0.35): no real signal — consider model-assisted classification
+        """
+        if self.confidence >= 0.75:
+            return "high"
+        elif self.confidence >= 0.50:
+            return "medium"
+        elif self.confidence >= 0.35:
+            return "low"
+        return "uncertain"
+
+    @property
+    def needs_model_classification(self) -> bool:
+        """
+        Should we escalate to a lightweight model for better classification?
+
+        When heuristics aren't confident enough, a tiny model (1.5B-3B) can
+        read the actual request and classify with much higher accuracy.
+        The cost is ~200-500 tokens — basically free — but adds ~1-3s latency.
+
+        Returns True when:
+        - confidence is below the 'low' threshold (< 0.35)
+        - OR confidence is 'low' AND multiple categories scored similarly
+          (ambiguous — could be code or debug, could be sysadmin or cloud)
+        """
+        return self.confidence < 0.35
+
 
 # Signal dictionaries: keyword → (category, subcategory, weight)
 # Weight reflects how strongly this keyword indicates the category.
@@ -2705,6 +2739,12 @@ def classify_request(description: str) -> RequestClassification:
 
     This is intentionally keyword-based — no LLM call needed, runs in
     microseconds, and is transparent about why it classified as it did.
+
+    Confidence tiers (from the result):
+      high (≥0.75)     — strong, unambiguous signals (e.g. "terraform" + "ecs")
+      medium (≥0.50)   — reasonable match, probably right
+      low (≥0.35)      — weak signals, educated guess
+      uncertain (<0.35) — no real signal, consider model-assisted classification
     """
     text = description.lower()
     scores: dict[tuple[str, str], float] = {}
@@ -2724,7 +2764,7 @@ def classify_request(description: str) -> RequestClassification:
         return RequestClassification(
             category="code",
             subcategory="build",
-            confidence=0.3,
+            confidence=0.2,
             suggested_profile="code-moderate",
             signals=[],
         )
@@ -2734,10 +2774,52 @@ def classify_request(description: str) -> RequestClassification:
     best_score = scores[best_key]
     category, subcategory = best_key
 
-    # Confidence: based on score magnitude and margin over runner-up
+    # ── Confidence calculation ────────────────────────────────────────
+    # Four factors contribute to confidence:
+    #
+    # 1. Signal strength: more/heavier signals = more confident
+    #    - 1 weak signal (0.5) = low confidence
+    #    - 3+ strong signals (2.0+) = high confidence
+    #
+    # 2. Margin: distance between winner and runner-up
+    #    - Tight race (margin < 0.5) = uncertain
+    #    - Clear winner (margin > 2.0) = very confident
+    #
+    # 3. Signal count: more distinct signals = more confident
+    #    - 1 signal could be coincidence
+    #    - 3+ signals from same category = strong consensus
+    #
+    # 4. Category coherence: do signals agree on category?
+    #    - All signals point to sysadmin = coherent
+    #    - Split between code and debug = ambiguous
+    #
     runner_up = max((s for k, s in scores.items() if k != best_key), default=0.0)
     margin = best_score - runner_up
-    raw_confidence = min(1.0, 0.3 + best_score * 0.15 + margin * 0.1)
+
+    # How many categories got votes?
+    categories_voted = len(set(k[0] for k in scores.keys()))
+    n_signals = len(fired)
+
+    # Base: starts low, builds up
+    conf = 0.20
+
+    # Factor 1: signal strength (0-0.30)
+    conf += min(0.30, best_score * 0.12)
+
+    # Factor 2: margin over runner-up (0-0.20)
+    conf += min(0.20, margin * 0.10)
+
+    # Factor 3: signal count bonus (0-0.15)
+    conf += min(0.15, (n_signals - 1) * 0.05)
+
+    # Factor 4: category coherence bonus (0-0.15)
+    if categories_voted == 1:
+        conf += 0.15  # all signals agree
+    elif categories_voted == 2:
+        conf += 0.05  # minor disagreement
+    # 3+ categories: no bonus (very ambiguous)
+
+    raw_confidence = min(1.0, conf)
 
     # Profile lookup with fallback
     profile_key = _SUBCATEGORY_TO_PROFILE.get(
@@ -2754,12 +2836,139 @@ def classify_request(description: str) -> RequestClassification:
     )
 
 
+# ── Model-assisted classification ─────────────────────────────────────────────
+# When heuristics are uncertain, a tiny model can classify with much higher
+# accuracy. This is the escalation path — used only when needed.
+
+_CLASSIFY_PROMPT = """Classify this task request into exactly one category and subcategory.
+
+Categories:
+- code/build: writing new code, functions, classes, features
+- code/bugfix: fixing bugs, errors, wrong output
+- sysadmin/docker: containers, Dockerfile, compose, Kubernetes
+- sysadmin/networking: firewalls, DNS, proxies, VPN, TLS
+- sysadmin/service: systemd, cron, logs, process management
+- sysadmin/database: backup, replication, migration, tuning
+- sysadmin/security: SSH, permissions, hardening, audit
+- sysadmin/storage: disks, mounts, NFS, ZFS, RAID
+- cloud/terraform: Terraform, OpenTofu, IaC provisioning
+- cloud/aws: AWS services (EC2, Lambda, ECS, S3, IAM, etc.)
+- cloud/cicd: CI/CD pipelines, GitHub Actions, deployments
+- cloud/networking: VPC, subnets, security groups, transit gateway
+- debug/general: troubleshooting errors, crashes, timeouts
+- debug/profiling: performance, bottlenecks, slow queries
+- cross-codebase/general: multi-repo, microservice coordination
+- cross-codebase/migration: upgrading, migrating between systems
+
+Respond with ONLY: category/subcategory
+Example: sysadmin/docker
+
+Task: {description}"""
+
+
+def classify_request_with_model(
+    description: str,
+    call_fn: callable | None = None,
+) -> RequestClassification | None:
+    """
+    Model-assisted classification for when heuristics are uncertain.
+
+    Uses a tiny model (~1.5B-3B) to read the actual request and classify.
+    Cost: ~200-500 tokens. Latency: ~1-3s. Basically free.
+
+    Parameters
+    ----------
+    description : str
+        The task request to classify.
+    call_fn : callable, optional
+        Function that takes (messages, model) and returns response text.
+        If None, returns None (caller should fall back to heuristic result).
+
+    Returns
+    -------
+    RequestClassification or None if model call fails/unavailable.
+    """
+    if call_fn is None:
+        return None
+
+    prompt = _CLASSIFY_PROMPT.format(description=description[:500])
+    try:
+        response = call_fn(
+            [{"role": "user", "content": prompt}],
+            "qwen2.5-coder:1.5b",  # tiny, fast, cheap
+        )
+        if not response:
+            return None
+
+        # Parse "category/subcategory" from response
+        text = response.strip().lower().split("\n")[0].strip()
+        if "/" not in text:
+            return None
+
+        parts = text.split("/", 1)
+        category = parts[0].strip()
+        subcategory = parts[1].strip()
+
+        # Validate against known categories
+        valid_categories = {"code", "sysadmin", "cloud", "debug", "cross-codebase"}
+        if category not in valid_categories:
+            return None
+
+        profile_key = _SUBCATEGORY_TO_PROFILE.get(
+            (category, subcategory),
+            _SUBCATEGORY_TO_PROFILE.get((category, "general"), "code-moderate"),
+        )
+
+        return RequestClassification(
+            category=category,
+            subcategory=subcategory,
+            confidence=0.80,  # model classification is generally reliable
+            suggested_profile=profile_key,
+            signals=[f"model:{category}/{subcategory}"],
+        )
+    except Exception:
+        return None
+
+
+def classify_request_adaptive(
+    description: str,
+    call_fn: callable | None = None,
+    confidence_threshold: float = 0.35,
+) -> RequestClassification:
+    """
+    Adaptive classification: heuristic first, model escalation if uncertain.
+
+    This is the recommended entry point for the proxy. It:
+    1. Runs the heuristic classifier (microseconds, free)
+    2. Checks confidence tier
+    3. If uncertain (below threshold), escalates to a tiny model (~1-3s, ~free)
+    4. Returns the best result
+
+    The threshold is tunable: lower = trust heuristics more (faster),
+    higher = escalate more often (more accurate, slightly slower).
+    """
+    heuristic_result = classify_request(description)
+
+    if heuristic_result.confidence >= confidence_threshold:
+        return heuristic_result
+
+    # Heuristic is uncertain — try model-assisted classification
+    model_result = classify_request_with_model(description, call_fn)
+    if model_result is not None:
+        return model_result
+
+    # Model unavailable or failed — return heuristic result as-is
+    return heuristic_result
+
+
 def classify_and_estimate(
     description: str,
     role: str = "oneshot",
     has_tests: bool = False,
     has_examples: bool = False,
     has_signatures: bool = False,
+    call_fn: callable | None = None,
+    confidence_threshold: float = 0.35,
 ) -> tuple[RequestClassification, SmashCoord, TaskProfile]:
     """
     Full pipeline: classify request → estimate coordinates → select profile.
@@ -2770,7 +2979,9 @@ def classify_and_estimate(
     - coordinates (difficulty × clarity)
     - profile (cost/time characteristics)
     """
-    classification = classify_request(description)
+    classification = classify_request_adaptive(
+        description, call_fn=call_fn, confidence_threshold=confidence_threshold,
+    )
     coord = estimate_query_coords(
         description, role=role,
         has_tests=has_tests, has_examples=has_examples,
@@ -2801,6 +3012,117 @@ def classify_and_estimate(
 
     profile = TASK_PROFILES[classification.suggested_profile]
     return classification, coord, profile
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROUTING TRANSPARENCY — reasoning blocks and summary lines
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def format_routing_reasoning(
+    classification: RequestClassification,
+    coord: SmashCoord,
+    profile: TaskProfile,
+    model_name: str | None = None,
+    model_compound_eff: float | None = None,
+    estimated_tokens: int | None = None,
+    estimated_cost: float | None = None,
+    estimated_time_s: float | None = None,
+    context_strategy: str | None = None,
+    uplift_applied: bool = False,
+    original_clarity: int | None = None,
+) -> str:
+    """
+    Generate the full reasoning block shown in thinking/reasoning tokens.
+
+    This is the transparent decision log — every signal, every nudge,
+    every routing choice explained. Clients that support reasoning tokens
+    display this; basic clients never see it.
+    """
+    lines: list[str] = []
+    lines.append("[codeclub routing]")
+
+    # Classification
+    tier = classification.confidence_tier
+    lines.append(
+        f"Task detected: {classification.category}/{classification.subcategory} "
+        f"(confidence: {classification.confidence:.2f} [{tier}])"
+    )
+    if classification.signals:
+        lines.append(f"Signals: {', '.join(repr(s) for s in classification.signals[:8])}")
+    if classification.needs_model_classification:
+        lines.append("⚠ Low confidence — model-assisted classification recommended")
+
+    # Coordinates
+    clarity_note = ""
+    if uplift_applied and original_clarity is not None:
+        clarity_note = f" (uplifted from {original_clarity})"
+    lines.append(f"Difficulty: {coord.difficulty}  Clarity: {coord.clarity}{clarity_note}")
+
+    # Profile
+    lines.append(
+        f"Profile: {profile.category} | "
+        f"{profile.gather_rounds} gather rounds, "
+        f"{profile.iterations} iterations, "
+        f"{profile.wallclock_per_iter_s:.0f}s dead/iter"
+    )
+
+    # Cost estimates
+    if estimated_tokens is not None:
+        cost_str = f"${estimated_cost:.4f}" if estimated_cost else "—"
+        time_str = f"{estimated_time_s:.0f}s" if estimated_time_s else "—"
+        lines.append(
+            f"Estimated tokens: {estimated_tokens:,} | "
+            f"Cost: {cost_str} | "
+            f"Wallclock: ~{time_str}"
+        )
+
+    # Context strategy
+    if context_strategy:
+        lines.append(f"Context strategy: {context_strategy}")
+
+    # Routing decision
+    lines.append("")
+    lines.append("Routing decision:")
+    if uplift_applied:
+        lines.append(f"  Clarity uplift: yes ({original_clarity} → {coord.clarity})")
+    if model_name:
+        eff_str = f" (compound efficiency: {model_compound_eff:.0f})" if model_compound_eff else ""
+        lines.append(f"  Model: {model_name}{eff_str}")
+
+    lines.append("")
+    if model_name:
+        lines.append(f"Proceeding with {model_name}...")
+
+    return "\n".join(lines)
+
+
+def format_routing_summary(
+    classification: RequestClassification,
+    coord: SmashCoord,
+    model_name: str | None = None,
+    estimated_tokens: int | None = None,
+    estimated_cost: float | None = None,
+    uplift_applied: bool = False,
+) -> str:
+    """
+    Generate the one-line summary prepended to the response.
+
+    Always visible. Compact. Shows what happened at a glance.
+
+    Examples:
+      🧭 sysadmin/docker → qwen3-coder:30b (d=55 c=68↑ | ~4.9K tok | $0.001)
+      🧭 code/build → rnj-1:8b (d=35 c=70 | ~1.2K tok | $0.0001)
+      🧭 cloud/terraform → gpt-5.4-mini (d=60 c=50↑ | ~26K tok | $0.005)
+    """
+    clarity_str = f"{coord.clarity}↑" if uplift_applied else str(coord.clarity)
+    model_str = model_name or "?"
+    tok_str = f"~{estimated_tokens / 1000:.1f}K tok" if estimated_tokens else "?"
+    cost_str = f"${estimated_cost:.4f}" if estimated_cost else "?"
+
+    return (
+        f"🧭 {classification.category}/{classification.subcategory} → "
+        f"{model_str} (d={coord.difficulty} c={clarity_str} | {tok_str} | {cost_str})"
+    )
 
 
 def measured_smash(quality: float, elapsed_s: float, right_fit: float) -> int:

@@ -2,7 +2,8 @@
 proxy.py — OpenAI-compatible context proxy.
 
 Sits between any LLM client and the model API.  Intercepts requests,
-assembles minimal context, routes to the best model, streams responses.
+classifies task type, assembles minimal context, routes to the best
+model, and streams responses — with full transparency about every decision.
 
 Usage:
     python -m codeclub.context.proxy --port 8300 --upstream http://localhost:11434/v1
@@ -12,6 +13,14 @@ Usage:
 
 The proxy is transparent — clients send standard OpenAI API requests
 and get standard responses back.  The magic happens in between.
+
+Headers:
+    X-Context-Fit: minimal|tight|balanced|generous|full (context precision)
+    X-Codeclub-Approve: auto|confirm|review (execution gating)
+    X-Codeclub-Approved: true (confirm pending plan)
+    X-Codeclub-Mode: chat|agent (single-shot vs dev loop)
+    X-Codeclub-Model: model-name (force specific model)
+    X-Codeclub-Transparency: full|summary|off (routing detail level)
 """
 
 from __future__ import annotations
@@ -95,6 +104,28 @@ try:
 except ImportError:
     AdaptiveFitTracker = None  # type: ignore[assignment,misc]
     FitOutcome = None  # type: ignore[assignment,misc]
+
+# Task-type classification and routing transparency (from tournament engine)
+try:
+    from tournament import (
+        classify_request_adaptive as _classify_task_type,
+        classify_and_estimate as _classify_and_estimate,
+        format_routing_reasoning as _format_reasoning,
+        format_routing_summary as _format_summary,
+        RequestClassification as _RequestClassification,
+        SmashCoord as _SmashCoord,
+        TaskProfile as _TaskProfile,
+        TASK_PROFILES as _TASK_PROFILES,
+    )
+except ImportError:
+    _classify_task_type = None  # type: ignore[assignment]
+    _classify_and_estimate = None  # type: ignore[assignment]
+    _format_reasoning = None  # type: ignore[assignment]
+    _format_summary = None  # type: ignore[assignment]
+    _RequestClassification = None  # type: ignore[assignment]
+    _SmashCoord = None  # type: ignore[assignment]
+    _TaskProfile = None  # type: ignore[assignment]
+    _TASK_PROFILES = None  # type: ignore[assignment]
 
 
 logger = logging.getLogger("codeclub.proxy")
@@ -278,13 +309,97 @@ def create_app(
         if not user_msg:
             return await _forward_raw(body, stream)
 
-        # 1. Classify
+        # 1. Classify intent (conversation-level: follow_up, debug, etc.)
         recent = [
             {"role": m["role"], "content": m.get("content", "")}
             for m in messages[-6:]
         ]
         classification = _safe_classify(user_msg, recent_context=recent)
         clarity = classification.clarity
+
+        # 1b. Classify task type (what KIND of task: code, sysadmin, cloud, etc.)
+        # This drives profile selection and cost estimation.
+        transparency = request.headers.get("X-Codeclub-Transparency", "full")
+        approve_mode = request.headers.get("X-Codeclub-Approve", "auto")
+        task_classification = None
+        task_coord = None
+        task_profile = None
+        routing_reasoning = ""
+        routing_summary = ""
+
+        if _classify_and_estimate is not None:
+            task_classification, task_coord, task_profile = _classify_and_estimate(
+                user_msg,
+            )
+            est_tokens = task_profile.total_tokens(task_coord) if task_profile else None
+            est_cost = (est_tokens * 0.5e-6) if est_tokens else None  # rough avg $/tok
+
+            if transparency != "off":
+                routing_summary = _format_summary(
+                    task_classification, task_coord,
+                    model_name=model or None,
+                    estimated_tokens=est_tokens,
+                    estimated_cost=est_cost,
+                )
+            if transparency == "full":
+                routing_reasoning = _format_reasoning(
+                    task_classification, task_coord, task_profile,
+                    model_name=model or None,
+                    estimated_tokens=est_tokens,
+                    estimated_cost=est_cost,
+                )
+
+            logger.info(
+                "task_type=%s/%s conf=%.2f [%s] profile=%s tokens=%s",
+                task_classification.category,
+                task_classification.subcategory,
+                task_classification.confidence,
+                task_classification.confidence_tier,
+                task_classification.suggested_profile,
+                f"{est_tokens:,}" if est_tokens else "?",
+            )
+
+            # Approval gate: in confirm/review mode, return the plan instead
+            if approve_mode in ("confirm", "review"):
+                plan = {
+                    "status": "pending_approval",
+                    "classification": {
+                        "category": task_classification.category,
+                        "subcategory": task_classification.subcategory,
+                        "confidence": task_classification.confidence,
+                        "confidence_tier": task_classification.confidence_tier,
+                        "signals": task_classification.signals,
+                    },
+                    "coord": {
+                        "difficulty": task_coord.difficulty,
+                        "clarity": task_coord.clarity,
+                    },
+                    "profile": {
+                        "name": task_classification.suggested_profile,
+                        "category": task_profile.category,
+                        "gather_rounds": task_profile.gather_rounds,
+                        "iterations": task_profile.iterations,
+                        "wallclock_per_iter_s": task_profile.wallclock_per_iter_s,
+                    },
+                    "routing": {
+                        "model": model,
+                        "estimated_tokens": est_tokens,
+                        "estimated_cost": est_cost,
+                    },
+                    "reasoning": routing_reasoning,
+                    "summary": routing_summary,
+                    "instructions": (
+                        "Re-send with X-Codeclub-Approved: true to proceed. "
+                        "Override model with X-Codeclub-Model header."
+                    ),
+                }
+                if approve_mode == "review":
+                    plan["alternatives"] = [
+                        {"strategy": "value", "description": "cheapest correct answer"},
+                        {"strategy": "speed", "description": "fastest correct answer"},
+                        {"strategy": "compound", "description": "best blend"},
+                    ]
+                return plan
 
         # 2. Episode management
         ep_id: str | None = None
@@ -402,14 +517,39 @@ def create_app(
         if routed_model != model:
             forwarded_body["model"] = routed_model
 
+        # 7b. Inject routing transparency into the request
+        # Reasoning block → system message (visible as thinking/reasoning tokens)
+        # Summary line → prepended to assistant response after it arrives
+        if routing_reasoning and transparency == "full":
+            # Insert as a system message so it appears in reasoning/thinking
+            forwarded_body["messages"].insert(0, {
+                "role": "system",
+                "content": routing_reasoning,
+            })
+
         # 8. Forward and stream
         if stream:
+            headers = {}
+            if routing_summary:
+                headers["X-Codeclub-Summary"] = routing_summary
             return StreamingResponse(
-                _stream_and_index(forwarded_body, ep_id, store, stats),
+                _stream_and_index(
+                    forwarded_body, ep_id, store, stats,
+                    routing_summary=routing_summary if transparency != "off" else "",
+                ),
                 media_type="text/event-stream",
+                headers=headers,
             )
 
         response_data = await _forward_and_get(forwarded_body)
+
+        # Inject summary into non-streaming response
+        if routing_summary and transparency != "off":
+            choices = response_data.get("choices", [])
+            if choices:
+                msg = choices[0].get("message", {})
+                content = msg.get("content", "")
+                msg["content"] = f"{routing_summary}\n\n{content}"
 
         # Index assistant response
         assistant_msg = ""
@@ -533,9 +673,21 @@ def create_app(
         ep_id: str | None,
         store: SessionStore | None,
         stats: dict,
+        routing_summary: str = "",
     ) -> AsyncIterator[bytes]:
         """Stream response while collecting it for indexing."""
         collected: list[str] = []
+
+        # Inject routing summary as the first SSE chunk if provided
+        if routing_summary:
+            summary_chunk = {
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": routing_summary + "\n\n"},
+                }],
+            }
+            yield f"data: {json.dumps(summary_chunk)}\n\n".encode()
+
         async with httpx.AsyncClient(timeout=120) as client:
             async with client.stream(
                 "POST", f"{upstream_url}/chat/completions", json=body
