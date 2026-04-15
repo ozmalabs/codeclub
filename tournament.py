@@ -733,6 +733,303 @@ def compute_efficiency_surface(
     return difficulties, clarities, time_grid, eff_grid
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TASK COST ESTIMATION — budget and routing recommendations
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class TaskEstimate:
+    """Predicted cost, time, quality, and efficiency for one model on one task."""
+    model: str
+    quality: float              # 0–1 predicted pass rate
+    tokens: int                 # estimated total tokens
+    time_s: float               # wallclock seconds
+    cost_usd: float             # dollars (API + electricity)
+    energy_j: float | None      # joules (local only)
+    value_eff: float            # 0–100 (quality per dollar)
+    speed_eff: float            # 0–100 (wallclock score)
+    compound_eff: float         # 0–100 (blended)
+    is_local: bool = False
+    hardware: str = ""
+
+
+@dataclass
+class RoutingRecommendation:
+    """Best model picks for different optimisation goals."""
+    best_value: TaskEstimate        # cheapest correct answer
+    best_speed: TaskEstimate        # fastest correct answer
+    best_compound: TaskEstimate     # best blend
+    all_estimates: list[TaskEstimate]
+
+
+@dataclass
+class ProjectBudget:
+    """Aggregate cost/time/quality across multiple tasks."""
+    strategy: str               # "value", "speed", "compound", or model name
+    n_tasks: int
+    total_cost_usd: float
+    total_time_s: float         # sequential wallclock
+    parallel_time_s: float      # if all tasks run concurrently
+    total_energy_j: float | None
+    avg_quality: float
+    per_task: list[TaskEstimate]
+
+
+def estimate_task(
+    coord: SmashCoord,
+    contenders: list["Contender"],
+    lang: str = "python",
+    hw_profile: str = "gpu_consumer",
+    cloud_speed_modifier: float = 1.0,
+    speed_weight: float = 0.5,
+    electricity_rate: float = 0.35,
+) -> list[TaskEstimate]:
+    """
+    Estimate cost, time, and quality for every contender on a single task.
+
+    Returns sorted by compound efficiency (best first).
+    """
+    hw = HARDWARE_PROFILES.get(hw_profile, HARDWARE_PROFILES["gpu_consumer"])
+    tokens = estimate_token_load(coord)
+    estimates: list[TaskEstimate] = []
+
+    for c in contenders:
+        quality = c.smash.fit(
+            coord, lang=lang, lang_proficiency=c.lang_proficiency,
+        )
+
+        # Speed: local uses hw profile, cloud uses cloud modifier
+        if c.is_local:
+            spd_mod = hw.speed_modifier
+            eff_power = c.power_w if c.power_w else hw.power_w
+        else:
+            spd_mod = cloud_speed_modifier
+            eff_power = None
+
+        effective_tok_s = (c.tok_s or 10.0) * spd_mod
+        time_s = tokens / max(effective_tok_s, 0.1)
+
+        # Cost: API + electricity
+        api_cost = (tokens * 0.4 * c.cost_input + tokens * 0.6 * c.cost_output) / 1e6
+        if eff_power and eff_power > 0:
+            kwh = (eff_power * time_s) / 3_600_000
+            energy_cost = kwh * electricity_rate
+            energy_j = eff_power * time_s
+        else:
+            energy_cost = 0.0
+            energy_j = None
+        total_cost = api_cost + energy_cost
+
+        val = value_efficiency(
+            quality, c.cost_input, c.cost_output, coord,
+            power_w=eff_power, time_s=time_s,
+            electricity_rate=electricity_rate,
+        )
+        spd = wallclock_score(c.tok_s or 10.0, coord, spd_mod)
+        cmp = compound_efficiency(
+            quality, c.tok_s or 10.0,
+            c.cost_input, c.cost_output, coord,
+            hw_speed_modifier=spd_mod,
+            cloud_speed_modifier=1.0,
+            power_w=eff_power,
+            electricity_rate=electricity_rate,
+            speed_weight=speed_weight,
+        )
+
+        estimates.append(TaskEstimate(
+            model=c.name,
+            quality=quality,
+            tokens=tokens,
+            time_s=time_s,
+            cost_usd=total_cost,
+            energy_j=energy_j,
+            value_eff=val,
+            speed_eff=spd,
+            compound_eff=cmp,
+            is_local=c.is_local,
+            hardware=hw.name if c.is_local else "cloud",
+        ))
+
+    estimates.sort(key=lambda e: e.compound_eff, reverse=True)
+    return estimates
+
+
+def recommend_routing(
+    coord: SmashCoord,
+    contenders: list["Contender"],
+    lang: str = "python",
+    hw_profile: str = "gpu_consumer",
+    cloud_speed_modifier: float = 1.0,
+    speed_weight: float = 0.5,
+    min_quality: float = 0.5,
+) -> RoutingRecommendation:
+    """
+    Recommend the best model for a task under different optimisation goals.
+
+    Filters to models with predicted quality >= min_quality, then picks
+    the best for value, speed, and compound efficiency.
+    """
+    all_est = estimate_task(
+        coord, contenders, lang=lang,
+        hw_profile=hw_profile,
+        cloud_speed_modifier=cloud_speed_modifier,
+        speed_weight=speed_weight,
+    )
+
+    viable = [e for e in all_est if e.quality >= min_quality]
+    if not viable:
+        viable = all_est  # fall back to best available
+
+    best_value = max(viable, key=lambda e: e.value_eff)
+    best_speed = max(viable, key=lambda e: e.speed_eff)
+    best_compound = max(viable, key=lambda e: e.compound_eff)
+
+    return RoutingRecommendation(
+        best_value=best_value,
+        best_speed=best_speed,
+        best_compound=best_compound,
+        all_estimates=all_est,
+    )
+
+
+def estimate_project_budget(
+    tasks: list[tuple[SmashCoord, str]],
+    contenders: list["Contender"],
+    strategy: str = "compound",
+    hw_profile: str = "gpu_consumer",
+    cloud_speed_modifier: float = 1.0,
+    speed_weight: float = 0.5,
+    min_quality: float = 0.5,
+) -> ProjectBudget:
+    """
+    Estimate total budget for a set of tasks under a routing strategy.
+
+    Parameters
+    ----------
+    tasks : list of (coord, lang) tuples
+    strategy : "value", "speed", "compound", or a model name
+    """
+    per_task: list[TaskEstimate] = []
+
+    for coord, lang in tasks:
+        if strategy in ("value", "speed", "compound"):
+            rec = recommend_routing(
+                coord, contenders, lang=lang,
+                hw_profile=hw_profile,
+                cloud_speed_modifier=cloud_speed_modifier,
+                speed_weight=speed_weight,
+                min_quality=min_quality,
+            )
+            pick = {"value": rec.best_value, "speed": rec.best_speed,
+                    "compound": rec.best_compound}[strategy]
+        else:
+            # Fixed model strategy
+            est = estimate_task(
+                coord, contenders, lang=lang,
+                hw_profile=hw_profile,
+                cloud_speed_modifier=cloud_speed_modifier,
+                speed_weight=speed_weight,
+            )
+            pick = next((e for e in est if e.model == strategy), est[0])
+        per_task.append(pick)
+
+    total_cost = sum(e.cost_usd for e in per_task)
+    total_time = sum(e.time_s for e in per_task)
+    parallel_time = max((e.time_s for e in per_task), default=0)
+    energies = [e.energy_j for e in per_task if e.energy_j is not None]
+    total_energy = sum(energies) if energies else None
+    avg_quality = sum(e.quality for e in per_task) / len(per_task) if per_task else 0
+
+    return ProjectBudget(
+        strategy=strategy,
+        n_tasks=len(tasks),
+        total_cost_usd=total_cost,
+        total_time_s=total_time,
+        parallel_time_s=parallel_time,
+        total_energy_j=total_energy,
+        avg_quality=avg_quality,
+        per_task=per_task,
+    )
+
+
+def format_task_estimates(estimates: list[TaskEstimate], top_n: int = 8) -> str:
+    """Format estimates as a table for terminal display."""
+    lines = [
+        f"{'Model':<25s} {'Quality':>7s} {'Time':>7s} {'Cost':>9s} "
+        f"{'Value':>6s} {'Speed':>6s} {'Cmpnd':>6s}",
+        "─" * 72,
+    ]
+    for e in estimates[:top_n]:
+        cost_str = f"${e.cost_usd:.5f}" if e.cost_usd < 0.01 else f"${e.cost_usd:.4f}"
+        lines.append(
+            f"{e.model:<25s} {e.quality:>6.0%} {e.time_s:>6.1f}s {cost_str:>9s} "
+            f"{e.value_eff:>5.1f} {e.speed_eff:>5.1f} {e.compound_eff:>5.1f}"
+        )
+    return "\n".join(lines)
+
+
+def format_project_budget(budget: ProjectBudget) -> str:
+    """Format a project budget for terminal display."""
+    lines = [
+        f"Strategy: {budget.strategy}  |  {budget.n_tasks} tasks",
+        f"Total cost:     ${budget.total_cost_usd:.4f}",
+        f"Sequential:     {budget.total_time_s:.1f}s",
+        f"Parallel:       {budget.parallel_time_s:.1f}s",
+        f"Avg quality:    {budget.avg_quality:.0%}",
+    ]
+    if budget.total_energy_j is not None:
+        lines.append(f"Total energy:   {budget.total_energy_j:.0f}J ({budget.total_energy_j/3600:.2f}Wh)")
+
+    # Model distribution
+    model_counts: dict[str, int] = {}
+    for e in budget.per_task:
+        model_counts[e.model] = model_counts.get(e.model, 0) + 1
+    lines.append("Routing:")
+    for model, count in sorted(model_counts.items(), key=lambda x: -x[1]):
+        lines.append(f"  {model:<25s} {count}× tasks")
+
+    return "\n".join(lines)
+
+
+def compare_strategies(
+    tasks: list[tuple[SmashCoord, str]],
+    contenders: list["Contender"],
+    strategies: list[str] | None = None,
+    hw_profile: str = "gpu_consumer",
+    speed_weight: float = 0.5,
+) -> str:
+    """Compare multiple routing strategies side by side."""
+    if strategies is None:
+        strategies = ["value", "speed", "compound"]
+        # Add top 3 individual models by avg compound efficiency
+        sample_coord = tasks[0][0] if tasks else SmashCoord(35, 65)
+        sample_lang = tasks[0][1] if tasks else "python"
+        est = estimate_task(sample_coord, contenders, lang=sample_lang,
+                            hw_profile=hw_profile, speed_weight=speed_weight)
+        for e in est[:3]:
+            if e.model not in strategies:
+                strategies.append(e.model)
+
+    lines = [
+        f"{'Strategy':<25s} {'Tasks':>5s} {'Cost':>10s} {'Seq Time':>9s} "
+        f"{'Par Time':>9s} {'Quality':>8s}",
+        "─" * 72,
+    ]
+    for strategy in strategies:
+        budget = estimate_project_budget(
+            tasks, contenders, strategy=strategy,
+            hw_profile=hw_profile, speed_weight=speed_weight,
+        )
+        cost_str = f"${budget.total_cost_usd:.4f}"
+        lines.append(
+            f"{budget.strategy:<25s} {budget.n_tasks:>5d} {cost_str:>10s} "
+            f"{budget.total_time_s:>8.1f}s {budget.parallel_time_s:>8.1f}s "
+            f"{budget.avg_quality:>7.0%}"
+        )
+    return "\n".join(lines)
+
+
 def estimate_query_coords(
     description: str,
     role: str = "oneshot",
