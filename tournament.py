@@ -1683,6 +1683,111 @@ TASK_PROFILES: dict[str, TaskProfile] = {
         output_tokens=8000,
         needs_rollback=True, needs_confirmation=True,
     ),
+
+    # ── Cloud / IaC ──────────────────────────────────────────────────────
+    "cloud-iac-simple": TaskProfile(
+        category="cloud",
+        # "add an S3 bucket with versioning and lifecycle rules"
+        gather_rounds=3, tokens_per_gather=2000,       # read existing tf state, check naming, IAM
+        iterations=2, wallclock_per_iter_s=60,         # terraform plan + apply
+        tokens_per_iter=1500,                          # read plan output, fix validation errors
+        output_tokens=400, output_is_config=True,
+    ),
+    "cloud-iac-moderate": TaskProfile(
+        category="cloud",
+        # "deploy a 3-tier app: ALB + ECS Fargate + RDS with VPC"
+        gather_rounds=8, tokens_per_gather=3500,       # existing VPC, subnets, SGs, IAM roles, state
+        gather_parallelism=3,                          # can read SGs, subnets, IAM in parallel
+        iterations=4, wallclock_per_iter_s=180,        # tf plan + apply is slow; ECS services take minutes
+        tokens_per_iter=2500,                          # plan diffs are verbose, error messages huge
+        output_tokens=2000, output_is_config=True,
+        needs_confirmation=True,
+    ),
+    "cloud-iac-hard": TaskProfile(
+        category="cloud",
+        # "multi-account landing zone: org, SCPs, transit gateway, centralized logging"
+        gather_rounds=15, tokens_per_gather=5000,      # org structure, existing accounts, SCPs, VPCs
+        gather_parallelism=4,
+        iterations=6, wallclock_per_iter_s=300,        # cross-account applies, DNS propagation
+        tokens_per_iter=4000,                          # huge plan diffs, IAM policy errors
+        output_tokens=5000, output_is_config=True,
+        needs_rollback=True, destructive=True, needs_confirmation=True,
+    ),
+    "cloud-lambda-simple": TaskProfile(
+        category="cloud",
+        # "create a Lambda that processes S3 events and writes to DynamoDB"
+        gather_rounds=4, tokens_per_gather=2000,       # check existing functions, IAM, event sources
+        iterations=3, wallclock_per_iter_s=45,         # deploy + invoke + check logs
+        tokens_per_iter=2000,                          # CloudWatch logs are verbose
+        output_tokens=800,
+    ),
+    "cloud-lambda-moderate": TaskProfile(
+        category="cloud",
+        # "build a step function pipeline: ingest → validate → transform → load"
+        gather_rounds=6, tokens_per_gather=3000,       # existing lambdas, SFN definitions, IAM
+        gather_parallelism=2,
+        iterations=4, wallclock_per_iter_s=90,         # deploy SFN + test execution
+        tokens_per_iter=2500,
+        output_tokens=2000,
+        needs_confirmation=True,
+    ),
+    "cloud-networking": TaskProfile(
+        category="cloud",
+        # "set up transit gateway peering between 3 VPCs across 2 regions"
+        gather_rounds=10, tokens_per_gather=3000,      # VPCs, route tables, NACLs, peering status
+        gather_parallelism=3,
+        iterations=4, wallclock_per_iter_s=120,        # TGW attachment takes minutes
+        tokens_per_iter=2000,
+        output_tokens=1500, output_is_config=True,
+        needs_confirmation=True,
+    ),
+    "cloud-cicd": TaskProfile(
+        category="cloud",
+        # "set up GitHub Actions → ECR → ECS blue/green deploy pipeline"
+        gather_rounds=8, tokens_per_gather=2500,       # existing workflows, ECR repos, ECS services, IAM
+        gather_parallelism=3,
+        iterations=5, wallclock_per_iter_s=120,        # full pipeline run: build + push + deploy + health
+        tokens_per_iter=3000,                          # CI logs are extremely verbose
+        output_tokens=1500, output_is_config=True,
+    ),
+    "cloud-cost-optimize": TaskProfile(
+        category="cloud",
+        # "audit and reduce AWS spend: right-size instances, reserved capacity, spot"
+        gather_rounds=12, tokens_per_gather=4000,      # cost explorer, instance metrics, reservations
+        gather_parallelism=4,
+        iterations=3, wallclock_per_iter_s=60,         # apply changes, verify no regressions
+        tokens_per_iter=2000,
+        output_tokens=1000, output_is_config=True,
+        needs_confirmation=True,
+    ),
+    "cloud-disaster-recovery": TaskProfile(
+        category="cloud",
+        # "set up cross-region DR: RDS read replica, S3 CRR, Route53 failover"
+        gather_rounds=10, tokens_per_gather=4000,      # existing infra, replication status, DNS
+        gather_parallelism=3,
+        iterations=4, wallclock_per_iter_s=240,        # replica promotion takes minutes; DNS TTL
+        tokens_per_iter=3000,
+        output_tokens=2000, output_is_config=True,
+        needs_rollback=True, needs_confirmation=True,
+    ),
+    "cloud-debug-simple": TaskProfile(
+        category="cloud",
+        # "Lambda timing out — find the bottleneck"
+        gather_rounds=5, tokens_per_gather=3000,       # CloudWatch logs, X-Ray traces, VPC config
+        gather_parallelism=2,
+        iterations=2, wallclock_per_iter_s=45,         # redeploy + invoke
+        tokens_per_iter=2000,
+        output_tokens=300,
+    ),
+    "cloud-debug-hard": TaskProfile(
+        category="cloud",
+        # "intermittent 503s on ALB — some targets healthy, some draining randomly"
+        gather_rounds=12, tokens_per_gather=4000,      # ALB logs, target health, SG rules, NACLs, ASG
+        gather_parallelism=3,
+        iterations=5, wallclock_per_iter_s=90,         # change + wait for health check cycle
+        tokens_per_iter=3000,
+        output_tokens=400,
+    ),
 }
 
 
@@ -1906,6 +2011,63 @@ SYSADMIN_ARCHETYPES: dict[str, tuple[SmashCoord, TaskProfile, str]] = {
         TASK_PROFILES["cross-codebase-migration"],
         "Migrate inter-service communication from REST to gRPC",
     ),
+
+    # ── Cloud / IaC ──────────────────────────────────────────────────────
+    "add-s3-bucket-tf": (
+        SmashCoord(15, 80),
+        TASK_PROFILES["cloud-iac-simple"],
+        "Add S3 bucket with versioning and lifecycle rules via Terraform",
+    ),
+    "lambda-s3-dynamo": (
+        SmashCoord(30, 70),
+        TASK_PROFILES["cloud-lambda-simple"],
+        "Lambda processing S3 events → DynamoDB with proper IAM",
+    ),
+    "ecs-fargate-3tier": (
+        SmashCoord(50, 55),
+        TASK_PROFILES["cloud-iac-moderate"],
+        "Deploy ALB + ECS Fargate + RDS with VPC in Terraform",
+    ),
+    "step-function-pipeline": (
+        SmashCoord(45, 60),
+        TASK_PROFILES["cloud-lambda-moderate"],
+        "Step Function: ingest → validate → transform → load pipeline",
+    ),
+    "transit-gateway-mesh": (
+        SmashCoord(55, 50),
+        TASK_PROFILES["cloud-networking"],
+        "Transit gateway peering 3 VPCs across 2 regions",
+    ),
+    "cicd-ecr-ecs-bluegreen": (
+        SmashCoord(45, 55),
+        TASK_PROFILES["cloud-cicd"],
+        "GitHub Actions → ECR → ECS blue/green deploy pipeline",
+    ),
+    "aws-cost-audit": (
+        SmashCoord(35, 50),
+        TASK_PROFILES["cloud-cost-optimize"],
+        "Audit and reduce AWS spend: right-size, reserved, spot",
+    ),
+    "cross-region-dr": (
+        SmashCoord(55, 45),
+        TASK_PROFILES["cloud-disaster-recovery"],
+        "Cross-region DR: RDS replica, S3 CRR, Route53 failover",
+    ),
+    "landing-zone-multi-account": (
+        SmashCoord(70, 40),
+        TASK_PROFILES["cloud-iac-hard"],
+        "Multi-account landing zone: org, SCPs, transit GW, centralized logging",
+    ),
+    "lambda-timeout-debug": (
+        SmashCoord(30, 55),
+        TASK_PROFILES["cloud-debug-simple"],
+        "Lambda timing out — find the VPC/cold-start/downstream bottleneck",
+    ),
+    "alb-503-intermittent": (
+        SmashCoord(50, 35),
+        TASK_PROFILES["cloud-debug-hard"],
+        "Intermittent 503s on ALB — targets healthy then draining randomly",
+    ),
 }
 
 
@@ -1944,6 +2106,306 @@ def format_sysadmin_archetypes(
     lines.append("Tokens = gather + generation + iteration (total LLM cost)")
     lines.append("Overhead = dead wallclock time (builds, deploys, test suites)")
     lines.append("Time = total wallclock including overhead")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONTEXT STRATEGIES — how compression and retrieval change the cost picture
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# The insight: sysadmin tasks cost 10-50× more than coding tasks at the same
+# difficulty because of context gathering. Compression and dynamic context
+# attack exactly this:
+#
+#   1. Structural compression (tree-sitter stubbing) — 70-95% token reduction
+#      on code files. Config files compress 40-60% (less structure).
+#      Log files compress 60-80% (pattern dedup, timestamp stripping).
+#
+#   2. Semantic retrieval — don't read 10 files, retrieve the 2 relevant
+#      sections. Cuts gather ROUNDS, not just tokens per round.
+#
+#   3. Indexed system state — once you've probed a service, index it.
+#      Next time you need that info, retrieve instead of re-probing.
+#      Eliminates redundant gather rounds across iterations.
+#
+#   4. Clarity uplift — vague sysadmin requests ("fix the networking")
+#      get uplifted to specific queries ("check iptables for port 443,
+#      verify nginx upstream config"). Fewer wasted rounds.
+#
+# The compound effect is multiplicative:
+#   fewer rounds × fewer tokens per round × better routing = massive savings
+
+@dataclass
+class ContextStrategy:
+    """
+    How context is managed during task execution.
+
+    Models the effect of compression, retrieval, and indexing on the
+    gather/iteration cost of a TaskProfile.
+    """
+    name: str
+
+    # Compression: reduces tokens_per_gather
+    gather_compression: float = 1.0         # 0.1 = 90% compression, 1.0 = none
+    iter_compression: float = 1.0           # compression on iteration tokens
+
+    # Retrieval: reduces gather_rounds (find relevant info faster)
+    gather_round_factor: float = 1.0        # 0.5 = half the rounds needed
+    gather_parallelism_boost: int = 0       # additional parallel probes enabled
+
+    # Indexing: reduces iteration cost (don't re-gather what you already know)
+    iter_round_factor: float = 1.0          # 0.7 = 30% fewer iteration tokens (cached context)
+
+    # Clarity uplift: reduces wasted rounds on vague tasks
+    clarity_uplift: int = 0                 # points of clarity improvement (0-20)
+
+    # Wallclock: retrieval can reduce dead time (cached builds, faster tests)
+    wallclock_factor: float = 1.0           # 0.8 = 20% less dead time (caching)
+
+    def apply(self, profile: TaskProfile, coord: SmashCoord) -> tuple["TaskProfile", SmashCoord]:
+        """
+        Return a modified (profile, coord) reflecting this strategy's effects.
+
+        Does NOT mutate the originals.
+        """
+        from copy import copy
+        p = copy(profile)
+
+        # Compression reduces tokens per round
+        p.tokens_per_gather = int(p.tokens_per_gather * self.gather_compression)
+        p.tokens_per_iter = int(p.tokens_per_iter * self.iter_compression)
+
+        # Retrieval reduces the number of rounds
+        p.gather_rounds = max(1, int(p.gather_rounds * self.gather_round_factor))
+        p.gather_parallelism = p.gather_parallelism + self.gather_parallelism_boost
+
+        # Indexing reduces iteration overhead
+        effective_iter_tokens = int(p.tokens_per_iter * self.iter_round_factor)
+        p.tokens_per_iter = effective_iter_tokens
+
+        # Caching reduces wallclock overhead
+        p.wallclock_per_iter_s = p.wallclock_per_iter_s * self.wallclock_factor
+
+        # Clarity uplift improves the coordinate
+        new_clarity = min(100, coord.clarity + self.clarity_uplift)
+        new_coord = SmashCoord(coord.difficulty, new_clarity)
+
+        return p, new_coord
+
+
+# ── Strategy presets ──────────────────────────────────────────────────────────
+# Each models a different level of context intelligence.
+
+CONTEXT_STRATEGIES: dict[str, ContextStrategy] = {
+    # No context management — raw agent reads everything every time
+    "naive": ContextStrategy(
+        name="Naive (no context management)",
+    ),
+
+    # Structural compression only — tree-sitter stubbing, log dedup
+    "compress": ContextStrategy(
+        name="Compression only",
+        gather_compression=0.30,        # 70% reduction on gather tokens
+        iter_compression=0.40,          # 60% reduction on iteration tokens
+    ),
+
+    # Semantic retrieval only — find relevant context faster
+    "retrieve": ContextStrategy(
+        name="Retrieval only",
+        gather_round_factor=0.5,        # half the gather rounds
+        gather_parallelism_boost=2,     # can search in parallel
+        iter_round_factor=0.7,          # 30% less re-gathering on iterations
+    ),
+
+    # Dynamic context: compression + retrieval + indexing + clarity uplift
+    "dynamic": ContextStrategy(
+        name="Dynamic context (full pipeline)",
+        gather_compression=0.30,        # structural compression
+        iter_compression=0.35,          # compression + cached context
+        gather_round_factor=0.4,        # retrieval cuts rounds by 60%
+        gather_parallelism_boost=3,     # parallel indexed lookups
+        iter_round_factor=0.5,          # indexed state eliminates re-probing
+        clarity_uplift=15,              # vague→specific before routing
+        wallclock_factor=0.85,          # cached artifacts reduce rebuild time
+    ),
+
+    # Dynamic context + right-sized routing (the full codeclub pipeline)
+    "codeclub": ContextStrategy(
+        name="Full codeclub pipeline",
+        gather_compression=0.25,        # aggressive compression
+        iter_compression=0.30,          # indexed + compressed
+        gather_round_factor=0.35,       # retrieval + indexed system state
+        gather_parallelism_boost=4,     # parallel fan-out on gather
+        iter_round_factor=0.4,          # barely re-gather — state is indexed
+        clarity_uplift=20,              # full clarity uplift pipeline
+        wallclock_factor=0.80,          # artifact caching + incremental builds
+    ),
+}
+
+
+def compare_context_strategies(
+    coord: SmashCoord,
+    profile: TaskProfile,
+    contenders: list["Contender"],
+    strategies: dict[str, ContextStrategy] | None = None,
+    lang: str = "python",
+    hw_profile: str = "gpu_consumer",
+    speed_weight: float = 0.5,
+) -> str:
+    """
+    Compare the same task under different context strategies.
+
+    Shows how compression, retrieval, and indexing change the cost picture.
+    """
+    if strategies is None:
+        strategies = CONTEXT_STRATEGIES
+
+    lines = [
+        f"Task: d={coord.difficulty} c={coord.clarity} | "
+        f"Profile: {profile.category} | "
+        f"Gather: {profile.gather_rounds}×{profile.tokens_per_gather}tok | "
+        f"Iterations: {profile.iterations}×{profile.wallclock_per_iter_s:.0f}s",
+        "",
+        f"{'Strategy':<32s} {'Tokens':>7s} {'↓':>5s} {'Cost':>8s} {'↓':>5s} "
+        f"{'Time':>8s} {'↓':>5s} {'Clarity':>4s} {'Model':>20s}",
+        "─" * 100,
+    ]
+
+    # Baseline (naive) for comparison
+    naive_tokens = profile.total_tokens(coord)
+    naive_est = estimate_task_profiled(
+        coord, profile, contenders, lang=lang,
+        hw_profile=hw_profile, speed_weight=speed_weight,
+    )
+    naive_cost = naive_est[0].cost_usd if naive_est else 0
+    naive_time = naive_est[0].time_s if naive_est else 0
+
+    for name, strategy in strategies.items():
+        mod_profile, mod_coord = strategy.apply(profile, coord)
+        estimates = estimate_task_profiled(
+            mod_coord, mod_profile, contenders, lang=lang,
+            hw_profile=hw_profile, speed_weight=speed_weight,
+        )
+        if not estimates:
+            continue
+        best = estimates[0]
+        tokens = mod_profile.total_tokens(mod_coord)
+        tok_pct = f"{(1 - tokens/naive_tokens)*100:.0f}%" if naive_tokens > 0 else "—"
+        cost_str = f"${best.cost_usd:.4f}" if best.cost_usd < 0.1 else f"${best.cost_usd:.2f}"
+        cost_pct = f"{(1 - best.cost_usd/naive_cost)*100:.0f}%" if naive_cost > 0 else "—"
+        time_str = f"{best.time_s:.0f}s" if best.time_s < 600 else f"{best.time_s/60:.1f}m"
+        time_pct = f"{(1 - best.time_s/naive_time)*100:.0f}%" if naive_time > 0 else "—"
+        lines.append(
+            f"{strategy.name:<32s} {tokens:>7d} {tok_pct:>5s} {cost_str:>8s} {cost_pct:>5s} "
+            f"{time_str:>8s} {time_pct:>5s} {mod_coord.clarity:>4d} {best.model:>20s}"
+        )
+
+    lines.append("─" * 100)
+
+    # Summary: naive vs full pipeline
+    if "codeclub" in strategies and "naive" in strategies:
+        full_profile, full_coord = strategies["codeclub"].apply(profile, coord)
+        full_est = estimate_task_profiled(
+            full_coord, full_profile, contenders, lang=lang,
+            hw_profile=hw_profile, speed_weight=speed_weight,
+        )
+        if full_est and naive_est:
+            full = full_est[0]
+            naive = naive_est[0]
+            full_tok = full_profile.total_tokens(full_coord)
+            lines.append("")
+            lines.append(f"Full pipeline saves: "
+                         f"{(1-full_tok/naive_tokens)*100:.0f}% tokens, "
+                         f"{(1-full.cost_usd/naive.cost_usd)*100:.0f}% cost, "
+                         f"{(1-full.time_s/naive.time_s)*100:.0f}% time")
+            if full.model != naive.model:
+                lines.append(f"Clarity uplift ({coord.clarity}→{full_coord.clarity}) "
+                             f"enabled routing to: {full.model} (was {naive.model})")
+
+    return "\n".join(lines)
+
+
+def compare_all_archetypes_with_context(
+    contenders: list["Contender"],
+    hw_profile: str = "gpu_consumer",
+) -> str:
+    """
+    Show naive vs full pipeline for every sysadmin archetype.
+
+    The money table: how much does codeclub save on real-world ops tasks?
+    """
+    naive = CONTEXT_STRATEGIES["naive"]
+    full = CONTEXT_STRATEGIES["codeclub"]
+
+    lines = [
+        "Context Strategy Savings: Naive vs Full Pipeline",
+        "═" * 110,
+        f"{'Task':<28s} {'Cat':>6s} "
+        f"{'Naive Tok':>9s} {'Full Tok':>9s} {'↓Tok':>5s} "
+        f"{'Naive $':>8s} {'Full $':>8s} {'↓$':>5s} "
+        f"{'Naive T':>8s} {'Full T':>8s} {'↓T':>5s}",
+        "─" * 110,
+    ]
+
+    total_naive_tok = 0
+    total_full_tok = 0
+    total_naive_cost = 0.0
+    total_full_cost = 0.0
+    total_naive_time = 0.0
+    total_full_time = 0.0
+
+    for name, (coord, profile, desc) in sorted(
+        SYSADMIN_ARCHETYPES.items(),
+        key=lambda x: (x[1][1].category, x[1][0].difficulty),
+    ):
+        # Naive
+        n_est = estimate_task_profiled(coord, profile, contenders, hw_profile=hw_profile)
+        n_tok = profile.total_tokens(coord)
+
+        # Full pipeline
+        f_profile, f_coord = full.apply(profile, coord)
+        f_est = estimate_task_profiled(f_coord, f_profile, contenders, hw_profile=hw_profile)
+        f_tok = f_profile.total_tokens(f_coord)
+
+        if not n_est or not f_est:
+            continue
+
+        nb, fb = n_est[0], f_est[0]
+        tok_save = f"{(1 - f_tok/n_tok)*100:.0f}%" if n_tok > 0 else "—"
+        cost_save = f"{(1 - fb.cost_usd/nb.cost_usd)*100:.0f}%" if nb.cost_usd > 0 else "—"
+        time_save = f"{(1 - fb.time_s/nb.time_s)*100:.0f}%" if nb.time_s > 0 else "—"
+
+        nc = f"${nb.cost_usd:.4f}" if nb.cost_usd < 0.1 else f"${nb.cost_usd:.2f}"
+        fc = f"${fb.cost_usd:.4f}" if fb.cost_usd < 0.1 else f"${fb.cost_usd:.2f}"
+        nt = f"{nb.time_s:.0f}s" if nb.time_s < 600 else f"{nb.time_s/60:.1f}m"
+        ft = f"{fb.time_s:.0f}s" if fb.time_s < 600 else f"{fb.time_s/60:.1f}m"
+
+        lines.append(
+            f"{name:<28s} {profile.category:>6s} "
+            f"{n_tok:>9d} {f_tok:>9d} {tok_save:>5s} "
+            f"{nc:>8s} {fc:>8s} {cost_save:>5s} "
+            f"{nt:>8s} {ft:>8s} {time_save:>5s}"
+        )
+
+        total_naive_tok += n_tok
+        total_full_tok += f_tok
+        total_naive_cost += nb.cost_usd
+        total_full_cost += fb.cost_usd
+        total_naive_time += nb.time_s
+        total_full_time += fb.time_s
+
+    lines.append("─" * 110)
+    tok_pct = f"{(1 - total_full_tok/total_naive_tok)*100:.0f}%"
+    cost_pct = f"{(1 - total_full_cost/total_naive_cost)*100:.0f}%"
+    time_pct = f"{(1 - total_full_time/total_naive_time)*100:.0f}%"
+    nc = f"${total_naive_cost:.4f}" if total_naive_cost < 1 else f"${total_naive_cost:.2f}"
+    fc = f"${total_full_cost:.4f}" if total_full_cost < 1 else f"${total_full_cost:.2f}"
+    lines.append(
+        f"{'TOTAL (17 tasks)':<28s} {'':>6s} "
+        f"{total_naive_tok:>9d} {total_full_tok:>9d} {tok_pct:>5s} "
+        f"{nc:>8s} {fc:>8s} {cost_pct:>5s} "
+        f"{total_naive_time:>7.0f}s {total_full_time:>7.0f}s {time_pct:>5s}"
+    )
     return "\n".join(lines)
 
 
