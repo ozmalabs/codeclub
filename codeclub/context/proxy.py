@@ -40,7 +40,7 @@ except ImportError:
 
 try:
     from fastapi import FastAPI, Request, Response
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
 except ImportError:
     FastAPI = None  # type: ignore[assignment,misc]
 
@@ -98,6 +98,12 @@ try:
     from .compaction import CompactionWorker
 except ImportError:
     CompactionWorker = None  # type: ignore[assignment,misc]
+
+try:
+    from codeclub.dev.loop import run as _dev_loop_run, make_call_fn as _make_call_fn
+except ImportError:
+    _dev_loop_run = None  # type: ignore[assignment]
+    _make_call_fn = None  # type: ignore[assignment]
 
 try:
     from .adaptive import AdaptiveFitTracker, FitOutcome
@@ -249,6 +255,134 @@ def create_app(
         adaptive = AdaptiveFitTracker(state_path=state_dir / "adaptive_fit.json")
         logger.info("Adaptive fit tracking enabled")
 
+    def _detect_mode(classification, coord, explicit_mode: str | None) -> str:
+        """Auto-detect chat vs agent mode from classification."""
+        if explicit_mode:
+            return explicit_mode
+        if classification is None:
+            return "chat"
+        cat = classification.category
+        d = coord.difficulty if coord else 50
+        if cat in ("sysadmin", "cloud", "cross-codebase"):
+            return "agent"  # iteration loops inherent
+        if cat == "debug":
+            return "agent" if d >= 40 else "chat"
+        if cat == "code":
+            return "agent" if d >= 30 else "chat"
+        return "chat"
+
+    async def _handle_agent_mode(
+        body, user_msg, classification, coord, profile,
+        routing_summary, routing_reasoning, transparency, stream,
+    ):
+        """Run the full dev loop for agent-mode tasks."""
+        import asyncio
+
+        model = body.get("model", "")
+
+        # Build an async call to the upstream API
+        async def _upstream_call(prompt: str) -> str:
+            req_body = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            }
+            async with httpx.AsyncClient(timeout=300) as client:
+                resp = await client.post(
+                    f"{upstream_url}/chat/completions",
+                    json=req_body,
+                )
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+
+        # Synchronous wrapper for the dev loop (which expects sync call_fn)
+        def _sync_call(prompt: str) -> str:
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(_upstream_call(prompt))
+            finally:
+                loop.close()
+
+        # Detect stack from classification
+        stack = None
+        if classification and classification.subcategory in ("api", "web"):
+            stack = "web-api"
+
+        # Run dev loop in thread (it's synchronous)
+        loop_result = await asyncio.to_thread(
+            _dev_loop_run,
+            user_msg,
+            map_fn=_sync_call,
+            fill_fn=_sync_call,
+            testgen_fn=_sync_call,
+            review_fn=_sync_call,
+            report_fn=_sync_call,
+            spec_fn=_sync_call,
+            max_fix_iterations=3,
+            run_review=True,
+            verbose=False,
+            stack=stack,
+        )
+
+        # Build response
+        result_content = []
+        if routing_summary and transparency != "off":
+            result_content.append(routing_summary)
+            result_content.append("")
+
+        result_content.append("## Dev Loop Result")
+        result_content.append(f"**Status:** {'✅ Passed' if loop_result.passed else '❌ Failed'}")
+        result_content.append(f"**Iterations:** {loop_result.iterations}")
+        result_content.append(f"**Time:** {loop_result.total_time_s:.1f}s")
+        if loop_result.approved:
+            result_content.append("**Review:** ✅ Approved")
+        result_content.append("")
+        if loop_result.final_code:
+            result_content.append("```python")
+            result_content.append(loop_result.final_code)
+            result_content.append("```")
+        if loop_result.report:
+            result_content.append("")
+            result_content.append(loop_result.report)
+
+        response_text = "\n".join(result_content)
+
+        if stream:
+            async def _agent_stream():
+                chunk = {
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": response_text},
+                        "finish_reason": "stop",
+                    }],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+
+            headers = {"X-Codeclub-Mode": "agent"}
+            if routing_summary:
+                headers["X-Codeclub-Summary"] = routing_summary
+            return StreamingResponse(
+                _agent_stream(),
+                media_type="text/event-stream",
+                headers=headers,
+            )
+
+        # Non-streaming response
+        return {
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": response_text},
+                "finish_reason": "stop",
+            }],
+            "model": body.get("model", ""),
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": len(response_text) // 4,
+                "total_tokens": len(response_text) // 4,
+            },
+        }
+
     @app.on_event("shutdown")
     async def _shutdown():
         if compaction_worker is not None:
@@ -321,6 +455,16 @@ def create_app(
         # This drives profile selection and cost estimation.
         transparency = request.headers.get("X-Codeclub-Transparency", "full")
         approve_mode = request.headers.get("X-Codeclub-Approve", "auto")
+        approved = request.headers.get("X-Codeclub-Approved", "").lower() == "true"
+
+        # Approved re-send: skip the approval gate and honour model override
+        if approved:
+            model_override = request.headers.get("X-Codeclub-Model")
+            if model_override:
+                model = model_override
+                body["model"] = model
+            approve_mode = "auto"
+
         task_classification = None
         task_coord = None
         task_profile = None
@@ -394,12 +538,48 @@ def create_app(
                     ),
                 }
                 if approve_mode == "review":
+                    # Compute real cost estimates for each strategy variant.
+                    # Rate assumptions: value uses cheap model (~$0.15/Mtok),
+                    # speed uses fast cloud model (~$3/Mtok),
+                    # compound is the default blended estimate.
+                    value_rate = 0.15e-6   # $/token (cheapest model)
+                    speed_rate = 3.0e-6    # $/token (fastest cloud model)
+                    compound_rate = 0.5e-6 # $/token (blended default)
                     plan["alternatives"] = [
-                        {"strategy": "value", "description": "cheapest correct answer"},
-                        {"strategy": "speed", "description": "fastest correct answer"},
-                        {"strategy": "compound", "description": "best blend"},
+                        {
+                            "strategy": "value",
+                            "description": "cheapest correct answer",
+                            "estimated_tokens": est_tokens,
+                            "estimated_cost": round(est_tokens * value_rate, 6) if est_tokens else None,
+                        },
+                        {
+                            "strategy": "speed",
+                            "description": "fastest correct answer",
+                            "estimated_tokens": est_tokens,
+                            "estimated_cost": round(est_tokens * speed_rate, 6) if est_tokens else None,
+                        },
+                        {
+                            "strategy": "compound",
+                            "description": "best blend (recommended)",
+                            "estimated_tokens": est_tokens,
+                            "estimated_cost": round(est_tokens * compound_rate, 6) if est_tokens else None,
+                        },
                     ]
-                return plan
+                return JSONResponse(
+                    content=plan,
+                    status_code=202,
+                    headers={"X-Codeclub-Summary": routing_summary},
+                )
+
+        # Mode detection: chat (single-shot) vs agent (dev loop)
+        explicit_mode = request.headers.get("X-Codeclub-Mode")
+        mode = _detect_mode(task_classification, task_coord, explicit_mode)
+
+        if mode == "agent" and _dev_loop_run is not None:
+            return await _handle_agent_mode(
+                body, user_msg, task_classification, task_coord, task_profile,
+                routing_summary, routing_reasoning, transparency, stream,
+            )
 
         # 2. Episode management
         ep_id: str | None = None
