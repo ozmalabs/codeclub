@@ -145,11 +145,74 @@ wallclock_score(tok_s=40, coord=SmashCoord(35, 70), hw_speed_modifier=5.0)   # H
 | Ollama | HTTP localhost | none |
 | llama.cpp server | HTTP any URL | none |
 
+## Request classification
+
+Before routing, the system detects *what kind* of task this is. This matters
+because task type fundamentally changes the cost model — a d=45 sysadmin task
+costs 10-50× more than a d=45 coding task due to context gathering.
+
+```python
+from tournament import classify_request, classify_and_estimate
+
+# Quick classification
+r = classify_request("build me a docker container with frigate using GPU offload")
+# → category="sysadmin", subcategory="docker", confidence=0.65
+# → suggested_profile="sysadmin-docker-moderate"
+# → signals=["container", "docker"]
+
+# Full pipeline: classify → estimate coords → select profile
+classification, coord, profile = classify_and_estimate(
+    "set up terraform for ECS fargate with blue-green deployments",
+    role="oneshot",
+)
+# classification.category = "cloud"
+# coord = SmashCoord(difficulty=55, clarity=50)  # cloud tasks get difficulty bump
+# profile = TASK_PROFILES["cloud-iac-moderate"]  # 5 gather rounds, 3 iterations
+```
+
+Categories and what they detect:
+
+| Category | Subcategories | Example signals |
+|---|---|---|
+| `code` | build, bugfix | "implement", "write a function", "fix the bug", "broken" |
+| `sysadmin` | docker, networking, service, database, security, storage | "dockerfile", "nginx", "systemctl", "pg_dump", "fail2ban" |
+| `cloud` | terraform, aws, gcp, azure, networking, cicd | "terraform", "ecs", "lambda", "vpc", "github actions" |
+| `debug` | general, profiling | "traceback", "memory leak", "503", "bottleneck" |
+| `cross-codebase` | general, migration | "across repos", "microservice", "migrate from" |
+
+Keyword-based, no LLM call, runs in microseconds. The classification nudges
+the routing coordinates — cloud tasks get +10 difficulty and −15 clarity
+(hidden complexity), sysadmin gets +5/−10, debug +5/−5.
+
+## Profile-aware routing
+
+For tasks beyond pure code generation, `estimate_task_profiled()` accounts
+for the full cost structure: context gathering, iteration loops, and dead
+wallclock time.
+
+```python
+from tournament import estimate_task_profiled, SmashCoord, TASK_PROFILES, build_contenders
+
+coord = SmashCoord(difficulty=45, clarity=60)
+profile = TASK_PROFILES["sysadmin-docker-moderate"]
+
+estimates = estimate_task_profiled(
+    coord, profile, build_contenders(),
+    lang="python", hw_profile="gpu_consumer",
+)
+# Each estimate includes: total_tokens (with gathering), total_time (with dead time),
+# total_cost (API + energy), quality, compound_efficiency
+```
+
+Same task, different profiles — wildly different costs:
+
+| Profile | Gather rounds | Iterations | Dead time | Total tokens |
+|---|---:|---:|---:|---:|
+| code-moderate | 0 | 1 | 0s | 1,200 |
+| sysadmin-docker-moderate | 5 | 3 | 180s | 22,000 |
+| cloud-iac-moderate | 5 | 3 | 480s | 26,000 |
+
 ## Coming soon
 
 **Web interface** — Visual task progression, queue management, accounting
 dashboard, model/endpoint status, git integration with one-click commit.
-
-**JSX/TSX tasks** — React components, hooks, TypeScript utilities across
-difficulty levels. Expanding the language proficiency matrix beyond Python and
-Rust.

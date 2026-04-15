@@ -197,12 +197,17 @@ The remaining 3 use a heuristic estimate based on model family and size. Data
 lives in `MEASURED_LANG_PROFICIENCY` — the routing system looks it up
 automatically via `Contender.__post_init__()`.
 
-| Model | Python | Rust | Gap |
-|---|---:|---:|---|
-| gpt-5.4-mini | 98% | 87% | +11pp |
-| claude-sonnet-4.6 | 100% | 82% | +18pp |
-| deepseek-r1 | 63% | **100%** | −33pp (better at Rust!) |
-| devstral-small | 71% | **0%** | complete blindspot |
+| Model | Python | Rust | TypeScript | Gap |
+|---|---:|---:|---:|---|
+| gpt-5.4-mini | 98% | 87% | — | +11pp Py→Rs |
+| claude-sonnet-4.6 | 100% | 82% | — | +18pp Py→Rs |
+| deepseek-r1 | 63% | **100%** | — | −33pp (better at Rust!) |
+| devstral-small | 71% | **0%** | — | complete Rust blindspot |
+
+TypeScript proficiency data pending tournament runs on 16 TS/TSX tasks (Counter,
+Observable, StateMachine, PromisePool, JSX components like Greeting and
+ToggleButton). TypeScriptRunner handles JSX transpilation via lightweight VNode
+shim — no React import needed.
 
 This is why routing needs a language axis. Sending a Rust task to a model with
 a 0% Rust score wastes money regardless of difficulty/clarity.
@@ -387,6 +392,137 @@ coord = estimate_query_coords(
 
 Signals: word count, complexity keywords ("async", "parser", "distributed"),
 presence of tests/examples/signatures. The role applies its offset.
+
+## Request classification
+
+Before routing, `classify_request()` determines what *kind* of task this is.
+Task type fundamentally changes the cost model:
+
+```python
+from tournament import classify_request, classify_and_estimate
+
+r = classify_request("set up nginx reverse proxy with letsencrypt SSL")
+# → category="sysadmin", subcategory="networking", confidence=0.72
+# → suggested_profile="sysadmin-network-moderate"
+# → signals=["nginx", "reverse proxy", "letsencrypt", "ssl cert"]
+
+# Full pipeline: classify + estimate coords + select profile
+classification, coord, profile = classify_and_estimate(
+    "deploy ECS fargate cluster with blue-green via terraform",
+)
+# classification.category = "cloud"
+# coord nudged: +10 difficulty, −15 clarity (IaC hidden complexity)
+# profile = TASK_PROFILES["cloud-iac-moderate"]
+```
+
+Five categories: `code` (build/bugfix), `sysadmin` (docker/networking/service/
+database/security/storage), `cloud` (terraform/aws/gcp/azure/cicd), `debug`
+(general/profiling), `cross-codebase` (refactor/migration). Keyword-based,
+no LLM call, microsecond latency.
+
+## Task profiles — real-world cost modelling
+
+The two axes tell you *how hard* a task is. Task profiles tell you *how much
+exploration and waiting happens around it*. A d=45 coding task costs ~1.2K
+tokens. A d=45 sysadmin task costs ~22K. Same difficulty, wildly different
+profiles.
+
+```python
+@dataclass
+class TaskProfile:
+    category: str                   # "code", "sysadmin", "cloud", "debug", "cross-codebase"
+
+    # Context gathering phase
+    gather_rounds: int = 0          # rounds of exploration before acting
+    tokens_per_gather: int = 2000   # tokens per gather round
+    gather_parallelism: int = 1     # concurrent probes
+
+    # Iteration loop: try → observe → adjust
+    iterations: int = 1             # expected attempt cycles
+    wallclock_per_iter_s: float = 0 # dead time per iteration (builds, deploys)
+    tokens_per_iter: int = 0        # additional tokens per iteration
+
+    # Risk profile
+    needs_rollback: bool = False
+    destructive: bool = False
+    needs_confirmation: bool = False
+```
+
+33 profiles across 5 categories:
+
+| Category | Profiles | Gather rounds | Iterations | Dead time/iter |
+|---|---:|---:|---:|---|
+| Code | 3 | 0 | 1 | 0s |
+| Sysadmin | 10 | 3–10 | 2–5 | 30–300s |
+| Cloud/IaC | 11 | 3–15 | 2–5 | 60–300s |
+| Debug | 3 | 5–20 | 3–10 | 10–60s |
+| Cross-codebase | 3 | 5–15 | 3–5 | 20–120s |
+
+### Sysadmin & cloud archetypes
+
+28 archetypes pair a `SmashCoord` with a `TaskProfile` to model real ops work:
+
+| Archetype | Difficulty | Clarity | Category | Total tokens |
+|---|---:|---:|---|---:|
+| restart-service | 15 | 80 | sysadmin | 2,600 |
+| nginx-reverse-proxy | 35 | 65 | sysadmin | 10,200 |
+| docker-gpu-frigate | 55 | 50 | sysadmin | 22,100 |
+| add-s3-bucket-tf | 20 | 80 | cloud | 7,800 |
+| ecs-fargate-3tier | 60 | 50 | cloud | 38,700 |
+| landing-zone-multi-account | 75 | 35 | cloud | 101,200 |
+| lambda-timeout-debug | 40 | 50 | cloud | 26,400 |
+
+The key insight: for sysadmin and cloud tasks, **context gathering is 80–95%
+of the total token cost**. The actual fix is often trivial. This is where
+compression and retrieval have the most impact.
+
+## Context strategies — closing the loop
+
+`ContextStrategy` models how context intelligence reduces cost. Five presets
+from naive (no management) to the full codeclub pipeline:
+
+```python
+@dataclass
+class ContextStrategy:
+    name: str
+    gather_compression: float = 1.0   # 0.25 = 75% fewer tokens per gather
+    gather_round_factor: float = 1.0  # 0.35 = 65% fewer rounds needed
+    gather_parallelism_boost: int = 0 # additional concurrent probes
+    iter_compression: float = 1.0     # compression on iteration tokens
+    iter_round_factor: float = 1.0    # fewer iterations via indexed state
+    clarity_uplift: float = 0.0       # clarity points added before routing
+    wallclock_factor: float = 1.0     # artifact caching reduces rebuild time
+```
+
+Results across all 28 archetypes:
+
+| Strategy | Tokens | Cost | Wallclock | What it does |
+|---|---:|---:|---:|---|
+| Naive | 1,005K | $0.178 | 271 min | baseline — no context management |
+| Compress | 397K | $0.070 | 254 min | structural compression only |
+| Retrieve | 470K | $0.082 | 225 min | semantic retrieval only |
+| Dynamic | 193K | $0.034 | 196 min | compress + retrieve + indexing |
+| **Codeclub** | **116K** | **$0.020** | **164 min** | full pipeline |
+| | **−88%** | **−89%** | **−39%** | |
+
+The 39% wallclock floor is physics: Docker builds, Terraform applies, and
+health checks can't be compressed. But the token cost — the actual LLM spend
+— drops 88%.
+
+Biggest winners:
+- **Landing zone** (multi-account AWS): 101K → 11K tokens
+- **ECS 3-tier**: 39K → 4.2K tokens
+- **GPU container**: 22K → 2.6K tokens
+
+```python
+from tournament import compare_context_strategies, compare_all_archetypes_with_context
+
+# Deep dive on a single task
+print(compare_context_strategies("docker-gpu-frigate"))
+
+# Full money table across all 28 archetypes
+print(compare_all_archetypes_with_context())
+```
 
 ## Tournament validation
 

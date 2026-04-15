@@ -22,7 +22,7 @@
 | `accounting` | `baseline.py` | Savings vs reference model calculations |
 | `benchmarks` | `tiered.py` | Three-way map backend benchmark |
 | `benchmarks` | `llm.py` | Live API benchmark harness |
-| — | `tournament.py` | Model tournament, efficiency maps, compound efficiency, cost estimation, parallelism, language proficiency |
+| — | `tournament.py` | Model tournament, efficiency maps, compound efficiency, cost estimation, parallelism, language proficiency, task profiles, context strategies, sysadmin/cloud archetypes, request classification, TypeScript runner |
 | — | `smash_viz.py` | Efficiency map visualisation (PNG, HTML, 3D surfaces, value overlays) |
 | — | `smash_server.py` | Interactive HTML efficiency map viewer |
 | — | `bench_tiered.py` | Tiered map backend benchmark runner |
@@ -42,6 +42,14 @@
 | Project budget | Aggregate cost across tasks with strategy comparison | `estimate_project_budget()` |
 | Decomposition | Map + N×parallel fills, fan-out estimation | `decompose_task()`, `estimate_parallel()` |
 | Language proficiency | Per-model per-language quality multiplier | `MEASURED_LANG_PROFICIENCY` |
+| `TaskProfile` | Real-world cost model: gather rounds, iterations, dead time | `TASK_PROFILES` (33 profiles) |
+| `ContextStrategy` | How context intelligence reduces cost (5 presets) | `CONTEXT_STRATEGIES` |
+| `RequestClassification` | Heuristic task type detection (code/sysadmin/cloud/debug) | `classify_request()` |
+| Sysadmin/cloud archetypes | SmashCoord + TaskProfile pairs for real ops tasks | `SYSADMIN_ARCHETYPES` (28) |
+| `classify_and_estimate()` | Full pipeline: classify → coords → profile | `tournament.py` |
+| `estimate_task_profiled()` | Profile-aware cost/time/quality estimation | `tournament.py` |
+| `compare_context_strategies()` | Deep-dive context savings for a single archetype | `tournament.py` |
+| `TypeScriptRunner` | TS/TSX execution with JSX shim (16 tasks) | `tournament.py` |
 
 ## References
 

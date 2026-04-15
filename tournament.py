@@ -2460,6 +2460,349 @@ def estimate_query_coords(
     return SmashCoord(difficulty=difficulty, clarity=clarity)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# REQUEST TYPE DETECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+# Before routing, we need to know WHAT KIND of task this is. A d=45 coding task
+# costs ~1.2K tokens. A d=45 sysadmin task costs ~22K. The same difficulty,
+# wildly different profiles. Detection drives profile selection, which drives
+# cost estimation, which drives model choice.
+
+@dataclass
+class RequestClassification:
+    """Result of classifying an incoming request."""
+    category: str                   # "code", "sysadmin", "cloud", "debug", "cross-codebase"
+    subcategory: str                # e.g. "build", "bugfix", "docker", "terraform", "networking"
+    confidence: float               # 0.0-1.0, how sure we are
+    suggested_profile: str          # key into TASK_PROFILES
+    signals: list[str]              # which signals fired
+
+
+# Signal dictionaries: keyword → (category, subcategory, weight)
+# Weight reflects how strongly this keyword indicates the category.
+# Multiple signals accumulate; highest total score wins.
+
+_REQUEST_SIGNALS: dict[str, tuple[str, str, float]] = {
+    # ── Code: building ────────────────────────────────────────────────
+    "implement": ("code", "build", 0.6),
+    "write a function": ("code", "build", 0.8),
+    "create a class": ("code", "build", 0.8),
+    "build a": ("code", "build", 0.5),
+    "add a feature": ("code", "build", 0.6),
+    "refactor": ("code", "build", 0.7),
+    "new endpoint": ("code", "build", 0.7),
+    "api endpoint": ("code", "build", 0.6),
+    "unit test": ("code", "build", 0.5),
+    "write test": ("code", "build", 0.5),
+    "type hint": ("code", "build", 0.4),
+    "dataclass": ("code", "build", 0.5),
+    "algorithm": ("code", "build", 0.6),
+    "parser": ("code", "build", 0.6),
+    "serialize": ("code", "build", 0.5),
+
+    # ── Code: bugfix ──────────────────────────────────────────────────
+    "fix the bug": ("code", "bugfix", 0.9),
+    "bugfix": ("code", "bugfix", 0.9),
+    "broken": ("code", "bugfix", 0.6),
+    "doesn't work": ("code", "bugfix", 0.7),
+    "not working": ("code", "bugfix", 0.7),
+    "error in": ("code", "bugfix", 0.5),
+    "wrong output": ("code", "bugfix", 0.7),
+    "off by one": ("code", "bugfix", 0.8),
+    "regression": ("code", "bugfix", 0.7),
+    "patch": ("code", "bugfix", 0.5),
+
+    # ── Sysadmin: docker/containers ───────────────────────────────────
+    "docker": ("sysadmin", "docker", 0.8),
+    "container": ("sysadmin", "docker", 0.6),
+    "dockerfile": ("sysadmin", "docker", 0.9),
+    "docker-compose": ("sysadmin", "docker", 0.9),
+    "docker compose": ("sysadmin", "docker", 0.9),
+    "podman": ("sysadmin", "docker", 0.8),
+    "kubernetes": ("sysadmin", "docker", 0.7),
+    "k8s": ("sysadmin", "docker", 0.7),
+    "helm": ("sysadmin", "docker", 0.7),
+
+    # ── Sysadmin: networking ──────────────────────────────────────────
+    "firewall": ("sysadmin", "networking", 0.8),
+    "iptables": ("sysadmin", "networking", 0.9),
+    "nftables": ("sysadmin", "networking", 0.9),
+    "nginx": ("sysadmin", "networking", 0.7),
+    "reverse proxy": ("sysadmin", "networking", 0.8),
+    "dns": ("sysadmin", "networking", 0.7),
+    "port forward": ("sysadmin", "networking", 0.8),
+    "ssl cert": ("sysadmin", "networking", 0.7),
+    "tls": ("sysadmin", "networking", 0.5),
+    "letsencrypt": ("sysadmin", "networking", 0.8),
+    "certbot": ("sysadmin", "networking", 0.8),
+    "wireguard": ("sysadmin", "networking", 0.8),
+    "vpn": ("sysadmin", "networking", 0.7),
+
+    # ── Sysadmin: services ────────────────────────────────────────────
+    "systemd": ("sysadmin", "service", 0.9),
+    "systemctl": ("sysadmin", "service", 0.9),
+    "service restart": ("sysadmin", "service", 0.9),
+    "cron": ("sysadmin", "service", 0.7),
+    "crontab": ("sysadmin", "service", 0.8),
+    "journalctl": ("sysadmin", "service", 0.8),
+    "syslog": ("sysadmin", "service", 0.7),
+    "logrotate": ("sysadmin", "service", 0.7),
+    "supervisor": ("sysadmin", "service", 0.7),
+
+    # ── Sysadmin: database ops ────────────────────────────────────────
+    "postgres": ("sysadmin", "database", 0.6),
+    "mysql": ("sysadmin", "database", 0.6),
+    "replication": ("sysadmin", "database", 0.8),
+    "backup database": ("sysadmin", "database", 0.9),
+    "restore database": ("sysadmin", "database", 0.9),
+    "pg_dump": ("sysadmin", "database", 0.9),
+    "mysqldump": ("sysadmin", "database", 0.9),
+    "redis": ("sysadmin", "database", 0.5),
+
+    # ── Sysadmin: security ────────────────────────────────────────────
+    "ssh": ("sysadmin", "security", 0.5),
+    "ssh key": ("sysadmin", "security", 0.7),
+    "chmod": ("sysadmin", "security", 0.7),
+    "chown": ("sysadmin", "security", 0.7),
+    "permissions": ("sysadmin", "security", 0.4),
+    "security audit": ("sysadmin", "security", 0.9),
+    "hardening": ("sysadmin", "security", 0.9),
+    "fail2ban": ("sysadmin", "security", 0.9),
+    "ufw": ("sysadmin", "security", 0.8),
+
+    # ── Sysadmin: storage/disk ────────────────────────────────────────
+    "disk space": ("sysadmin", "storage", 0.8),
+    "mount": ("sysadmin", "storage", 0.6),
+    "fstab": ("sysadmin", "storage", 0.9),
+    "lvm": ("sysadmin", "storage", 0.9),
+    "zfs": ("sysadmin", "storage", 0.9),
+    "raid": ("sysadmin", "storage", 0.8),
+    "nfs": ("sysadmin", "storage", 0.8),
+    "smb": ("sysadmin", "storage", 0.7),
+    "samba": ("sysadmin", "storage", 0.7),
+
+    # ── Cloud / IaC ───────────────────────────────────────────────────
+    "terraform": ("cloud", "terraform", 0.9),
+    "tofu": ("cloud", "terraform", 0.9),
+    "opentofu": ("cloud", "terraform", 0.9),
+    "cloudformation": ("cloud", "cloudformation", 0.9),
+    "pulumi": ("cloud", "iac", 0.9),
+    "cdk": ("cloud", "iac", 0.8),
+    "aws": ("cloud", "aws", 0.6),
+    "ec2": ("cloud", "aws", 0.8),
+    "s3 bucket": ("cloud", "aws", 0.8),
+    "lambda function": ("cloud", "aws", 0.8),
+    "ecs": ("cloud", "aws", 0.8),
+    "fargate": ("cloud", "aws", 0.8),
+    "step function": ("cloud", "aws", 0.8),
+    "iam": ("cloud", "aws", 0.7),
+    "iam role": ("cloud", "aws", 0.8),
+    "iam policy": ("cloud", "aws", 0.8),
+    "cloudwatch": ("cloud", "aws", 0.7),
+    "route53": ("cloud", "aws", 0.8),
+    "rds": ("cloud", "aws", 0.8),
+    "dynamodb": ("cloud", "aws", 0.8),
+    "sqs": ("cloud", "aws", 0.7),
+    "sns": ("cloud", "aws", 0.7),
+    "api gateway": ("cloud", "aws", 0.7),
+    "alb": ("cloud", "aws", 0.7),
+    "elb": ("cloud", "aws", 0.7),
+    "gcp": ("cloud", "gcp", 0.7),
+    "azure": ("cloud", "azure", 0.7),
+    "transit gateway": ("cloud", "networking", 0.9),
+    "vpc": ("cloud", "networking", 0.7),
+    "subnet": ("cloud", "networking", 0.6),
+    "security group": ("cloud", "networking", 0.7),
+    "nacl": ("cloud", "networking", 0.8),
+
+    # ── Cloud: CI/CD ──────────────────────────────────────────────────
+    "github actions": ("cloud", "cicd", 0.8),
+    "gitlab ci": ("cloud", "cicd", 0.8),
+    "jenkins": ("cloud", "cicd", 0.7),
+    "pipeline": ("cloud", "cicd", 0.4),
+    "ci/cd": ("cloud", "cicd", 0.9),
+    "cicd": ("cloud", "cicd", 0.9),
+    "deployment pipeline": ("cloud", "cicd", 0.9),
+    "blue-green": ("cloud", "cicd", 0.8),
+    "canary deploy": ("cloud", "cicd", 0.9),
+    "ecr": ("cloud", "cicd", 0.6),
+
+    # ── Debug / troubleshooting ───────────────────────────────────────
+    "debug": ("debug", "general", 0.5),
+    "traceback": ("debug", "general", 0.8),
+    "stack trace": ("debug", "general", 0.8),
+    "segfault": ("debug", "general", 0.9),
+    "core dump": ("debug", "general", 0.9),
+    "memory leak": ("debug", "general", 0.9),
+    "why is": ("debug", "general", 0.4),
+    "intermittent": ("debug", "general", 0.6),
+    "flaky": ("debug", "general", 0.7),
+    "timeout": ("debug", "general", 0.5),
+    "503": ("debug", "general", 0.6),
+    "500 error": ("debug", "general", 0.7),
+    "connection refused": ("debug", "general", 0.8),
+    "out of memory": ("debug", "general", 0.8),
+    "oom": ("debug", "general", 0.8),
+    "strace": ("debug", "general", 0.9),
+    "perf": ("debug", "general", 0.5),
+    "profiling": ("debug", "profiling", 0.7),
+    "slow query": ("debug", "profiling", 0.8),
+    "bottleneck": ("debug", "profiling", 0.7),
+
+    # ── Cross-codebase ────────────────────────────────────────────────
+    "across repos": ("cross-codebase", "general", 0.9),
+    "monorepo": ("cross-codebase", "general", 0.7),
+    "cross-service": ("cross-codebase", "general", 0.8),
+    "microservice": ("cross-codebase", "general", 0.6),
+    "migration": ("cross-codebase", "migration", 0.6),
+    "migrate from": ("cross-codebase", "migration", 0.8),
+    "upgrade from": ("cross-codebase", "migration", 0.7),
+    "breaking change": ("cross-codebase", "migration", 0.7),
+    "dependency update": ("cross-codebase", "migration", 0.6),
+}
+
+# Map (category, subcategory) → best-fit TaskProfile key
+_SUBCATEGORY_TO_PROFILE: dict[tuple[str, str], str] = {
+    # Code
+    ("code", "build"): "code-moderate",
+    ("code", "bugfix"): "code-simple",
+
+    # Sysadmin
+    ("sysadmin", "docker"): "sysadmin-docker-moderate",
+    ("sysadmin", "networking"): "sysadmin-network-moderate",
+    ("sysadmin", "service"): "sysadmin-service-moderate",
+    ("sysadmin", "database"): "sysadmin-db-simple",
+    ("sysadmin", "security"): "sysadmin-security-audit",
+    ("sysadmin", "storage"): "sysadmin-service-simple",
+
+    # Cloud
+    ("cloud", "terraform"): "cloud-iac-moderate",
+    ("cloud", "cloudformation"): "cloud-iac-moderate",
+    ("cloud", "iac"): "cloud-iac-moderate",
+    ("cloud", "aws"): "cloud-lambda-moderate",
+    ("cloud", "gcp"): "cloud-iac-moderate",
+    ("cloud", "azure"): "cloud-iac-moderate",
+    ("cloud", "networking"): "cloud-networking",
+    ("cloud", "cicd"): "cloud-cicd",
+
+    # Debug
+    ("debug", "general"): "debug-moderate",
+    ("debug", "profiling"): "debug-moderate",
+
+    # Cross-codebase
+    ("cross-codebase", "general"): "cross-codebase-refactor",
+    ("cross-codebase", "migration"): "cross-codebase-migration",
+}
+
+
+def classify_request(description: str) -> RequestClassification:
+    """
+    Heuristic classifier: determine task category from request text.
+
+    Scans for signal words/phrases, accumulates weighted scores per
+    (category, subcategory) pair, and picks the highest scorer.
+    Falls back to ("code", "build") when no signals fire.
+
+    This is intentionally keyword-based — no LLM call needed, runs in
+    microseconds, and is transparent about why it classified as it did.
+    """
+    text = description.lower()
+    scores: dict[tuple[str, str], float] = {}
+    fired: list[str] = []
+
+    # Longer phrases first so "docker compose" beats "docker"
+    sorted_signals = sorted(_REQUEST_SIGNALS.keys(), key=len, reverse=True)
+
+    for phrase in sorted_signals:
+        if phrase in text:
+            cat, subcat, weight = _REQUEST_SIGNALS[phrase]
+            key = (cat, subcat)
+            scores[key] = scores.get(key, 0.0) + weight
+            fired.append(phrase)
+
+    if not scores:
+        return RequestClassification(
+            category="code",
+            subcategory="build",
+            confidence=0.3,
+            suggested_profile="code-moderate",
+            signals=[],
+        )
+
+    # Pick the winner
+    best_key = max(scores, key=lambda k: scores[k])
+    best_score = scores[best_key]
+    category, subcategory = best_key
+
+    # Confidence: based on score magnitude and margin over runner-up
+    runner_up = max((s for k, s in scores.items() if k != best_key), default=0.0)
+    margin = best_score - runner_up
+    raw_confidence = min(1.0, 0.3 + best_score * 0.15 + margin * 0.1)
+
+    # Profile lookup with fallback
+    profile_key = _SUBCATEGORY_TO_PROFILE.get(
+        (category, subcategory),
+        _SUBCATEGORY_TO_PROFILE.get((category, "general"), "code-moderate"),
+    )
+
+    return RequestClassification(
+        category=category,
+        subcategory=subcategory,
+        confidence=round(raw_confidence, 2),
+        suggested_profile=profile_key,
+        signals=fired,
+    )
+
+
+def classify_and_estimate(
+    description: str,
+    role: str = "oneshot",
+    has_tests: bool = False,
+    has_examples: bool = False,
+    has_signatures: bool = False,
+) -> tuple[RequestClassification, SmashCoord, TaskProfile]:
+    """
+    Full pipeline: classify request → estimate coordinates → select profile.
+
+    This is the universal entry point. Give it a natural-language request
+    and it returns everything the router needs:
+    - classification (what kind of task)
+    - coordinates (difficulty × clarity)
+    - profile (cost/time characteristics)
+    """
+    classification = classify_request(description)
+    coord = estimate_query_coords(
+        description, role=role,
+        has_tests=has_tests, has_examples=has_examples,
+        has_signatures=has_signatures,
+    )
+
+    # Classification can also nudge coordinates
+    if classification.category == "sysadmin":
+        coord = SmashCoord(
+            difficulty=min(100, coord.difficulty + 5),
+            clarity=max(0, coord.clarity - 10),  # ops tasks are inherently vaguer
+        )
+    elif classification.category == "cloud":
+        coord = SmashCoord(
+            difficulty=min(100, coord.difficulty + 10),
+            clarity=max(0, coord.clarity - 15),  # IaC has hidden complexity
+        )
+    elif classification.category == "debug":
+        coord = SmashCoord(
+            difficulty=min(100, coord.difficulty + 5),
+            clarity=max(0, coord.clarity - 5),
+        )
+    elif classification.category == "cross-codebase":
+        coord = SmashCoord(
+            difficulty=min(100, coord.difficulty + 15),
+            clarity=max(0, coord.clarity - 10),
+        )
+
+    profile = TASK_PROFILES[classification.suggested_profile]
+    return classification, coord, profile
+
+
 def measured_smash(quality: float, elapsed_s: float, right_fit: float) -> int:
     """
     Compute measured Club Smash (0–100) from fight results.

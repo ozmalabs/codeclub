@@ -102,7 +102,7 @@ With semantic retrieval on a full repository (hundreds of files), codeclub routi
 
 ## Scenario 4: Club Smash tournament (oneshot generation)
 
-232 fights. 19 models. 28 tasks spanning Python and Rust, difficulty 8–95,
+232 fights. 19 models. 47 tasks spanning Python, Rust, and TypeScript, difficulty 8–95,
 clarity 5–85. Each fight: model receives NL spec → generates code → tested
 against automated test suite. Pass = 100%, fail = 0%.
 
@@ -151,19 +151,38 @@ Outside it, you're wasting money (overpowered) or time (underpowered). See
 
 From high-clarity tasks only (clarity ≥ 60):
 
-| Model | Python | Rust | Gap |
-|---|---:|---:|---|
-| gpt-5.4-mini | 98% | 87% | +11pp |
-| claude-sonnet-4.6 | 100% | 82% | +18pp |
-| gpt-5.4 | 96% | 85% | +11pp |
-| deepseek-r1 | 63% | 100% | −33pp |
-| gemini-2.5-flash | 85% | 57% | +28pp |
-| codestral-2508 | 78% | 50% | +28pp |
-| devstral-small | 71% | 0% | complete blindspot |
-| phi-4 | 42% | 0% | complete blindspot |
-| gemini-2.5-pro | 57% | 38% | +19pp |
-| qwen2.5-coder:1.5b | 65% | 12% | +53pp |
-| rnj-1:8b | 55% | 30% | +25pp |
+| Model | Python | Rust | TypeScript | Gap |
+|---|---:|---:|---:|---|
+| gpt-5.4-mini | 98% | 87% | — | +11pp Py→Rs |
+| claude-sonnet-4.6 | 100% | 82% | — | +18pp Py→Rs |
+| gpt-5.4 | 96% | 85% | — | +11pp Py→Rs |
+| deepseek-r1 | 63% | 100% | — | −33pp |
+| gemini-2.5-flash | 85% | 57% | — | +28pp Py→Rs |
+| codestral-2508 | 78% | 50% | — | +28pp Py→Rs |
+| devstral-small | 71% | 0% | — | complete Rust blindspot |
+| phi-4 | 42% | 0% | — | complete Rust blindspot |
+| gemini-2.5-pro | 57% | 38% | — | +19pp Py→Rs |
+| qwen2.5-coder:1.5b | 65% | 12% | — | +53pp Py→Rs |
+| rnj-1:8b | 55% | 30% | — | +25pp Py→Rs |
+
+TypeScript column pending tournament runs. 16 TS/TSX tasks defined:
+Counter, EventEmitter, Result type, StateMachine, Observable, AsyncQueue,
+PromisePool, generic type utilities, plus 6 JSX/TSX components (Greeting,
+Counter, ToggleButton, TodoList, Timer, DataFetcher).
+
+### TypeScript/TSX tasks
+
+16 tasks spanning difficulty 8–70, covering pure TypeScript and JSX/TSX
+components. TypeScriptRunner uses `tsx` for zero-config execution with a
+lightweight VNode-based React.createElement shim for JSX (no DOM, no React
+import needed).
+
+| Difficulty range | Tasks | Examples |
+|---|---:|---|
+| 8–15 | 4 | Counter, Greeting (JSX), TS Fizzbuzz |
+| 20–35 | 5 | EventEmitter, ToggleButton (JSX), Result type |
+| 40–55 | 4 | StateMachine, Observable, TodoList (JSX) |
+| 60–70 | 3 | PromisePool, DataFetcher (JSX), Generic utilities |
 
 ### How to reproduce
 
@@ -184,6 +203,56 @@ Requires:
 - Ollama running with `qwen2.5-coder:1.5b` for local CPU
 - llama-server on port 8081 for B580 GPU (rnj-1:8b)
 - `rustc` on PATH for Rust task compilation
+- `tsx` on PATH for TypeScript/TSX task execution
+
+---
+
+## Scenario 5: Task profile cost projections
+
+Not benchmark fights — analytical projections using `TaskProfile` cost models.
+These show the *structure* of costs across task types, explaining why sysadmin
+and cloud tasks are fundamentally more expensive than pure coding.
+
+### Same difficulty, different task types
+
+All at d=45, c=60 — moderate difficulty, moderate clarity:
+
+| Task type | Profile | Gather rounds | Iterations | Dead time | Total tokens |
+|---|---|---:|---:|---:|---:|
+| Code | code-moderate | 0 | 1 | 0s | 1,200 |
+| Sysadmin | sysadmin-docker-moderate | 5 | 3 | 180s | 22,000 |
+| Cloud/IaC | cloud-iac-moderate | 5 | 3 | 480s | 26,000 |
+| Debug | debug-moderate | 8 | 4 | 120s | 19,200 |
+| Cross-codebase | cross-codebase-refactor | 5 | 3 | 120s | 16,800 |
+
+Context gathering is 80–95% of total tokens for non-code tasks.
+
+### Context strategy comparison
+
+Same 28 archetypes, five context management strategies:
+
+| Strategy | Total tokens | Total cost | Total wallclock | Technique |
+|---|---:|---:|---:|---|
+| Naive | 1,005,243 | $0.178 | 271 min | no management |
+| Compress | 397,392 | $0.070 | 254 min | structural compression |
+| Retrieve | 470,135 | $0.082 | 225 min | semantic retrieval |
+| Dynamic | 193,247 | $0.034 | 196 min | compress + retrieve + index |
+| **Codeclub** | **116,433** | **$0.020** | **164 min** | full pipeline |
+
+Savings: **88% tokens, 89% cost, 39% wallclock** vs naive.
+
+Biggest individual savings:
+- Landing zone (multi-account AWS): 101K → 11K tokens (89%)
+- ECS 3-tier: 39K → 4.2K tokens (89%)
+- Cross-region DR: 67K → 7.6K tokens (89%)
+
+The wallclock floor (39%) is physics — builds, deploys, and health checks
+can't be compressed. Token cost is where compression + retrieval shine.
+
+```python
+from tournament import compare_all_archetypes_with_context
+print(compare_all_archetypes_with_context())
+```
 
 ---
 

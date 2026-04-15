@@ -47,7 +47,7 @@ Use one, two, or all four. They compose.
 
 ## The numbers
 
-232 fights. 19 models. 28 tasks across Python and Rust, difficulty 8–95, clarity 5–85.
+232 fights. 19 models. 47 tasks across Python, Rust, and TypeScript, difficulty 8–95, clarity 5–85.
 
 | Model | Fights | Avg Quality | Avg Time | Total Cost | Hardware |
 |---|---:|---:|---:|---:|---|
@@ -70,14 +70,18 @@ Use one, two, or all four. They compose.
 
 Models aren't equally good at everything. Data from high-clarity tasks only:
 
-| Model | Python | Rust | Gap |
-|---|---:|---:|---|
-| gpt-5.4-mini | 98% | 87% | +11pp |
-| claude-sonnet-4.6 | 100% | 82% | +18pp |
-| deepseek-r1 | 63% | **100%** | **−33pp** (better at Rust!) |
-| devstral-small | 71% | **0%** | complete blindspot |
-| gemini-2.5-pro | 57% | 38% | can't write valid Rust |
-| qwen2.5-coder:1.5b | 65% | 12% | +53pp |
+| Model | Python | Rust | TypeScript | Gap |
+|---|---:|---:|---:|---|
+| gpt-5.4-mini | 98% | 87% | — | +11pp Py→Rs |
+| claude-sonnet-4.6 | 100% | 82% | — | +18pp Py→Rs |
+| deepseek-r1 | 63% | **100%** | — | **−33pp** (better at Rust!) |
+| devstral-small | 71% | **0%** | — | complete Rust blindspot |
+| gemini-2.5-pro | 57% | 38% | — | can't write valid Rust |
+| qwen2.5-coder:1.5b | 65% | 12% | — | +53pp Py→Rs |
+
+TypeScript column pending tournament runs — 16 TS/TSX tasks are defined (Counter,
+Observable, StateMachine, PromisePool, JSX components, etc.) with a TypeScriptRunner
+that handles JSX transpilation via a lightweight VNode shim.
 
 This is why routing needs a language axis. Sending a Rust task to gemini-2.5-pro is
 burning money. → [Full results](docs/benchmarks.md)
@@ -229,6 +233,31 @@ model craters to ~0% regardless of capability. Above 50, even small models hit
 80–100%. This isn't a linear decay — it's a sigmoid. The routing system uses this
 to decide when a vague spec should be uplifted before sending to any model.
 
+**Request classification.** Before routing, the system detects *what kind* of
+task this is — coding (build/bugfix), sysadmin (docker/networking/database),
+cloud/IaC (Terraform/AWS/CI-CD), debug, or cross-codebase. This matters because
+a d=45 coding task costs ~1.2K tokens, but a d=45 sysadmin task costs ~22K —
+context gathering dominates. The classifier runs in microseconds (keyword
+heuristics, no LLM call) and selects the right `TaskProfile` for cost estimation.
+
+**Task profiles & context strategies.** Real-world sysadmin and cloud tasks
+aren't just "generate code" — they involve rounds of context gathering (reading
+logs, checking configs), iteration loops (apply → observe → adjust), and dead
+wallclock time (builds, deploys, health checks). 33 task profiles model this
+cost structure. 5 context strategy presets show how compression + retrieval
+attack the gathering cost:
+
+| Strategy | Tokens | Cost | Wallclock | Technique |
+|---|---:|---:|---:|---|
+| Naive | 1,005K | $0.178 | 271 min | no context management |
+| Compress | 397K | $0.070 | 254 min | structural compression |
+| Retrieve | 470K | $0.082 | 225 min | semantic retrieval |
+| **Full pipeline** | **116K** | **$0.020** | **164 min** | compress + retrieve + index + cache |
+| | **−88%** | **−89%** | **−39%** | |
+
+The 39% wallclock floor is physics — Docker builds, Terraform applies, and health
+checks can't be compressed. But the token cost drops 88%.
+
 **Parallelism.** Some tasks decompose into a skeleton (map) + independent
 function bodies (fills) that run concurrently on cheap models. The system
 estimates decomposability from task structure and compares oneshot vs decomposed
@@ -247,7 +276,7 @@ Roles aren't special code paths — they're just coordinates on this plane:
 
 ### Efficiency maps
 
-**Quality matrix** — 19 models × 28 tasks. Green=100%, red=0%.
+**Quality matrix** — 19 models × 47 tasks (Python, Rust, TypeScript). Green=100%, red=0%.
 
 ![Quality matrix heatmap](benchmarks/maps/quality_matrix.png)
 
@@ -346,8 +375,8 @@ pip install codeclub-infra    # routing only
 
 - [Compression](docs/compression.md) — tree-sitter stubbing, semantic retrieval, brevity constraints
 - [Dev loop](docs/dev-loop.md) — pipeline, fix loop, benchmarks, accounting
-- [Routing](docs/routing.md) — hardware declaration, setup presets, providers, dynamic levers
-- [Club Smash](docs/club-smash.md) — two-axis model routing, efficiency maps, right-sizing
+- [Routing](docs/routing.md) — hardware declaration, setup presets, providers, request classification
+- [Club Smash](docs/club-smash.md) — efficiency maps, task profiles, context strategies, right-sizing
 - [Dynamic context](docs/dynamic-context.md) — session indexing, per-request retrieval, adaptive fit
 - [Benchmarks](docs/benchmarks.md) — full results, reproduction steps, methodology
 - [Architecture](docs/architecture.md) — file map, references
