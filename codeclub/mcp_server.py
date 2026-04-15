@@ -37,6 +37,12 @@ logger = logging.getLogger("codeclub.mcp")
 
 _tournament = None
 _compressor = None
+_models_mod = None
+
+# Session state: client-seeded models.  Empty until set_available_models is
+# called.  Each entry is a ModelSpec (matched from registry or synthesised).
+_seeded_models: list = []       # list[ModelSpec]
+_seeded_model_ids: set = set()  # quick lookup
 
 
 def _ensure_tournament():
@@ -69,6 +75,125 @@ def _ensure_compressor():
         ) from exc
 
 
+def _ensure_models():
+    global _models_mod
+    if _models_mod is not None:
+        return _models_mod
+    from codeclub.infra import models as _m
+    _models_mod = _m
+    return _m
+
+
+# ---------------------------------------------------------------------------
+# Model matching — fuzzy match client IDs against the known registry
+# ---------------------------------------------------------------------------
+
+def _normalise_id(raw: str) -> str:
+    """Normalise a model ID for fuzzy matching: lowercase, dots→dashes."""
+    return raw.lower().strip().replace(".", "-").replace("_", "-")
+
+
+def _match_registry(client_id: str, registry: list) -> "ModelSpec | None":
+    """Try to find a registry ModelSpec matching a client-provided ID."""
+    norm = _normalise_id(client_id)
+    # Exact normalised match
+    for m in registry:
+        if _normalise_id(m.id) == norm:
+            return m
+    # Substring match (e.g. client sends "claude-opus-4.6", registry has
+    # "claude-opus-4-6")
+    for m in registry:
+        if norm in _normalise_id(m.id) or _normalise_id(m.id) in norm:
+            return m
+    # Name match
+    for m in registry:
+        if norm in _normalise_id(m.name) or _normalise_id(m.name) in norm:
+            return m
+    return None
+
+
+def _synthesise_model(client_id: str, meta: dict) -> "ModelSpec":
+    """
+    Create a ModelSpec from client-provided metadata for an unknown model.
+
+    The client might only send {"id": "some-model"} or might include
+    cost_in, cost_out, context, etc.  We fill gaps with heuristics based
+    on the model name.
+    """
+    m = _ensure_models()
+
+    name = meta.get("name", client_id)
+    norm = _normalise_id(client_id)
+
+    # Heuristic tier from name
+    if any(k in norm for k in ("opus", "o1", "o3", "gpt-5")):
+        tier, complexity = "premium", "expert"
+        default_cost_in, default_cost_out = 5.0, 25.0
+    elif any(k in norm for k in ("sonnet", "gpt-4", "gpt-5-mini")):
+        tier, complexity = "medium", "expert"
+        default_cost_in, default_cost_out = 3.0, 15.0
+    elif any(k in norm for k in ("haiku", "gpt-4-1", "mini", "flash")):
+        tier, complexity = "cheap", "complex"
+        default_cost_in, default_cost_out = 0.4, 1.6
+    else:
+        tier, complexity = "medium", "moderate"
+        default_cost_in, default_cost_out = 1.0, 5.0
+
+    # Detect provider from name patterns
+    if any(k in norm for k in ("claude", "sonnet", "opus", "haiku")):
+        provider, family = "anthropic", "claude"
+    elif any(k in norm for k in ("gpt", "o1", "o3", "codex")):
+        provider, family = "openai", "gpt"
+    elif "gemini" in norm or "gemma" in norm:
+        provider, family = "google", "gemma"
+    else:
+        provider, family = "unknown", "unknown"
+
+    return m.ModelSpec(
+        id=client_id,
+        name=name,
+        provider=meta.get("provider", provider),
+        family=meta.get("family", family),
+        cost_in=meta.get("cost_in", default_cost_in),
+        cost_out=meta.get("cost_out", default_cost_out),
+        context=meta.get("context", 200_000),
+        swe_bench=meta.get("swe_bench"),
+        human_eval=meta.get("human_eval"),
+        local=False,
+        phases=frozenset(meta.get("phases", m.PHASES)),
+        max_complexity=meta.get("max_complexity", complexity),
+        tags=frozenset(meta.get("tags", {"cloud", tier, "client-seeded"})),
+    )
+
+
+def _build_seeded_router() -> "ModelRouter | None":
+    """
+    Build a ModelRouter constrained to client-seeded models.
+
+    Temporarily injects seeded models into the registry so the router's
+    standard select() logic works, then restores the original.
+    """
+    if not _seeded_models:
+        return None
+
+    m = _ensure_models()
+    original = m.REGISTRY[:]
+    try:
+        # Replace registry with seeded set only
+        m.REGISTRY.clear()
+        m.REGISTRY.extend(_seeded_models)
+        providers = {model.provider for model in _seeded_models}
+        router = m.ModelRouter(
+            available_providers=providers,
+            budget="premium",   # don't filter by cost — client chose these
+            prefer_local=False,
+        )
+        return router
+    finally:
+        m.REGISTRY.clear()
+        m.REGISTRY.extend(original)
+
+
 # ---------------------------------------------------------------------------
 # MCP server definition
 # ---------------------------------------------------------------------------
@@ -79,6 +204,49 @@ server = Server("codeclub")
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     return [
+        Tool(
+            name="set_available_models",
+            description=(
+                "Seed the routing engine with the models YOUR client can "
+                "actually use. Call this before route_model so recommendations "
+                "are executable. Accepts a list of model IDs with optional "
+                "metadata (cost, context window). Models are matched against "
+                "the known registry; unknowns get heuristic specs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "models": {
+                        "type": "array",
+                        "description": (
+                            "List of available models. Each item is either a "
+                            "string (model ID) or an object with id + optional "
+                            "fields: name, cost_in, cost_out, context, provider, "
+                            "max_complexity, phases."
+                        ),
+                        "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "name": {"type": "string"},
+                                        "cost_in": {"type": "number", "description": "USD per 1M input tokens"},
+                                        "cost_out": {"type": "number", "description": "USD per 1M output tokens"},
+                                        "context": {"type": "integer", "description": "Context window size"},
+                                        "provider": {"type": "string"},
+                                        "max_complexity": {"type": "string", "enum": ["trivial", "simple", "moderate", "complex", "expert"]},
+                                    },
+                                    "required": ["id"],
+                                },
+                            ],
+                        },
+                    },
+                },
+                "required": ["models"],
+            },
+        ),
         Tool(
             name="classify_task",
             description=(
@@ -150,7 +318,10 @@ async def list_tools() -> list[Tool]:
             name="route_model",
             description=(
                 "Pick the best model for a task given difficulty and clarity "
-                "coordinates. Returns the recommended model with reasoning."
+                "coordinates. Returns per-phase model assignments (spec, map, "
+                "fill, review, etc) with costs. If set_available_models was "
+                "called, picks ONLY from those models. Otherwise uses the "
+                "full registry with an optional setup preset."
             ),
             inputSchema={
                 "type": "object",
@@ -163,8 +334,38 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Task clarity (0-100)",
                     },
+                    "setup": {
+                        "type": "string",
+                        "description": (
+                            "Router preset: local_only, local_b580, "
+                            "openrouter_free, openrouter_cheap, anthropic, "
+                            "copilot, github, best_local_first (default)"
+                        ),
+                    },
                 },
                 "required": ["difficulty", "clarity"],
+            },
+        ),
+        Tool(
+            name="list_models",
+            description=(
+                "List all available models for a given setup/preset. "
+                "Shows per-phase assignments at each complexity level "
+                "with costs. Useful for understanding what models will "
+                "be used and optimising for cost."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "setup": {
+                        "type": "string",
+                        "description": (
+                            "Router preset: local_only, local_b580, "
+                            "openrouter_free, openrouter_cheap, anthropic, "
+                            "copilot, github, best_local_first (default)"
+                        ),
+                    },
+                },
             },
         ),
         Tool(
@@ -190,7 +391,9 @@ async def list_tools() -> list[Tool]:
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
-        if name == "classify_task":
+        if name == "set_available_models":
+            return _handle_set_models(arguments)
+        elif name == "classify_task":
             return _handle_classify(arguments)
         elif name == "estimate_cost":
             return _handle_estimate(arguments)
@@ -198,6 +401,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return _handle_compress(arguments)
         elif name == "route_model":
             return _handle_route(arguments)
+        elif name == "list_models":
+            return _handle_list_models(arguments)
         elif name == "list_profiles":
             return _handle_list_profiles(arguments)
         else:
@@ -249,11 +454,24 @@ def _handle_estimate(args: dict) -> list[TextContent]:
 
     if profile:
         tokens = profile.total_tokens(coord)
+        # Use seeded models for cost if available
+        if _seeded_models:
+            m = _ensure_models()
+            cheapest = min(_seeded_models, key=lambda x: x.cost_in)
+            costliest = max(_seeded_models, key=lambda x: x.cost_in)
+            avg_rate = (cheapest.cost_in + costliest.cost_in) / 2 / 1_000_000
+            cost_usd = round(tokens * avg_rate, 4)
+            cost_note = f"based on seeded models (cheapest: {cheapest.id}, costliest: {costliest.id})"
+        else:
+            cost_usd = round(tokens * 0.00000015, 4)
+            cost_note = "default rate ($0.15/1M tokens)"
+
         estimate["profile"] = {
             "key": classification.suggested_profile or "unknown",
             "category": profile.category,
             "estimated_tokens": tokens,
-            "estimated_cost_usd": round(tokens * 0.00000015, 4),
+            "estimated_cost_usd": cost_usd,
+            "cost_note": cost_note,
             "gather_rounds": profile.gather_rounds,
             "iterations": profile.iterations,
             "wallclock_overhead_s": profile.total_wallclock_overhead_s(),
@@ -309,36 +527,181 @@ def _handle_compress(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
+def _handle_set_models(args: dict) -> list[TextContent]:
+    """Seed the engine with the client's available models."""
+    global _seeded_models, _seeded_model_ids
+    m = _ensure_models()
+    raw_list = args["models"]
+
+    matched, synthesised, failed = [], [], []
+    new_models = []
+    new_ids = set()
+
+    for item in raw_list:
+        if isinstance(item, str):
+            client_id, meta = item, {}
+        else:
+            client_id = item["id"]
+            meta = {k: v for k, v in item.items() if k != "id"}
+
+        # Try matching against known registry
+        spec = _match_registry(client_id, m.REGISTRY)
+        if spec:
+            matched.append({"client_id": client_id, "matched": spec.id,
+                            "name": spec.name, "cost_in": spec.cost_in,
+                            "cost_out": spec.cost_out})
+            new_models.append(spec)
+            new_ids.add(spec.id)
+        else:
+            # Synthesise from metadata + heuristics
+            try:
+                spec = _synthesise_model(client_id, meta)
+                synthesised.append({"client_id": client_id, "name": spec.name,
+                                    "cost_in": spec.cost_in,
+                                    "cost_out": spec.cost_out,
+                                    "tier": spec.max_complexity})
+                new_models.append(spec)
+                new_ids.add(spec.id)
+            except Exception as e:
+                failed.append({"client_id": client_id, "error": str(e)})
+
+    _seeded_models = new_models
+    _seeded_model_ids = new_ids
+
+    result = {
+        "seeded": len(new_models),
+        "matched_from_registry": matched,
+        "synthesised": synthesised,
+    }
+    if failed:
+        result["failed"] = failed
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
 def _handle_route(args: dict) -> list[TextContent]:
+    m = _ensure_models()
     t = _ensure_tournament()
     d = args["difficulty"]
     c = args["clarity"]
+    setup = args.get("setup", "best_local_first")
 
-    coord = t.SmashCoord(difficulty=d, clarity=c)
-
-    # Use the routing engine to find the best model
-    model = t.pick_model(coord) if hasattr(t, "pick_model") else None
-
-    result = {"difficulty": d, "clarity": c}
-
-    if model:
-        result["recommended_model"] = str(model)
+    # Determine complexity from difficulty
+    complexity = m.estimate_complexity(
+        f"difficulty-{d}"  # estimate_complexity expects a task string
+    ) if hasattr(m, "estimate_complexity") else "moderate"
+    # Direct mapping is more reliable
+    if d <= 15:
+        complexity = "trivial"
+    elif d <= 30:
+        complexity = "simple"
+    elif d <= 50:
+        complexity = "moderate"
+    elif d <= 70:
+        complexity = "complex"
     else:
-        # Fallback: provide heuristic guidance
-        if d <= 20 and c >= 60:
-            rec = "Small model (1.5-8B) — simple, clear task"
-        elif d <= 40 and c >= 40:
-            rec = "Mid-tier model (14-32B) — moderate task"
-        elif d <= 60:
-            rec = "Large model (70B+ or cloud) — complex task"
+        complexity = "expert"
+
+    # Build router: seeded models take priority, else use setup preset
+    if _seeded_models:
+        original = m.REGISTRY[:]
+        try:
+            m.REGISTRY.clear()
+            m.REGISTRY.extend(_seeded_models)
+            providers = {model.provider for model in _seeded_models}
+            router = m.ModelRouter(
+                available_providers=providers,
+                budget="premium",
+                prefer_local=False,
+            )
+            suite = router.select_suite(complexity)
+        finally:
+            m.REGISTRY.clear()
+            m.REGISTRY.extend(original)
+    else:
+        router = m.router_for_setup(setup)
+        suite = router.select_suite(complexity)
+
+    # Build response with per-phase assignments
+    phases = {}
+    total_cost_per_1k_calls = 0.0
+    for phase, model in sorted(suite.items()):
+        if model is None:
+            phases[phase] = {"model": None, "reason": "no model available"}
         else:
-            rec = "Frontier model (GPT-4o, Claude Sonnet, etc) — hard task"
+            avg_tokens = 2000  # rough estimate per phase call
+            phase_cost = (model.cost_in + model.cost_out) * avg_tokens / 1_000_000
+            total_cost_per_1k_calls += phase_cost * 1000
+            phases[phase] = {
+                "model_id": model.id,
+                "model_name": model.name,
+                "cost_in": model.cost_in,
+                "cost_out": model.cost_out,
+                "local": model.local,
+                "max_complexity": model.max_complexity,
+            }
 
-        if c < 40:
-            rec += " ⚠️ Low clarity — consider clarifying the spec first"
+    # Strategy advice
+    if c < 40:
+        strategy = "Low clarity — use a strong model to clarify the spec first, then route fill to cheaper models"
+    elif d <= 30:
+        strategy = "Simple task — smaller/cheaper models handle all phases well"
+    elif d <= 60:
+        strategy = "Moderate task — use mid-tier for spec/map, cheap for fill"
+    else:
+        strategy = "Hard task — frontier for spec/map/review, mid-tier for fill"
 
-        result["recommendation"] = rec
+    result = {
+        "difficulty": d,
+        "clarity": c,
+        "complexity": complexity,
+        "source": "seeded_models" if _seeded_models else f"preset:{setup}",
+        "strategy": strategy,
+        "phases": phases,
+    }
 
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+def _handle_list_models(args: dict) -> list[TextContent]:
+    m = _ensure_models()
+    setup = args.get("setup", "best_local_first")
+
+    if _seeded_models:
+        models = _seeded_models
+        source = "seeded_models"
+    else:
+        router = m.router_for_setup(setup)
+        # Get all models the router would consider (all complexities, all phases)
+        seen = set()
+        models = []
+        for complexity in m.COMPLEXITY_LEVELS:
+            suite = router.select_suite(complexity)
+            for model in suite.values():
+                if model and model.id not in seen:
+                    seen.add(model.id)
+                    models.append(model)
+        source = f"preset:{setup}"
+
+    rows = []
+    for model in sorted(models, key=lambda x: (x.cost_in, x.id)):
+        rows.append({
+            "id": model.id,
+            "name": model.name,
+            "provider": model.provider,
+            "cost_in": model.cost_in,
+            "cost_out": model.cost_out,
+            "context": model.context,
+            "local": model.local,
+            "max_complexity": model.max_complexity,
+            "phases": sorted(model.phases),
+        })
+
+    result = {
+        "source": source,
+        "count": len(rows),
+        "models": rows,
+    }
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
