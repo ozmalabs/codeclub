@@ -297,8 +297,12 @@ class DashboardResponse(BaseModel):
     completed_today: int
     failed_today: int
     total_cost_today: float
-    hardware: HardwareResponse | None
+    hardware: HardwareResponse | None = None
+    hardware_status: list[dict[str, Any]] = []
     recent_activity: list[dict[str, Any]]
+    tournament_fights_today: int = 0
+    tournament_champions_today: int = 0
+    pipeline_paused: bool = False
 
 
 # ── Settings schemas ────────────────────────────────────────────────────────
@@ -309,6 +313,48 @@ class SettingsResponse(BaseModel):
 
 class SettingsUpdate(BaseModel):
     settings: dict[str, str]
+
+
+# ── Git schemas ───────────────────────────────────────────────────────────────
+
+class WorktreeInfo(BaseModel):
+    path: str
+    branch: str | None
+    head: str
+    is_task: bool
+
+
+class BranchInfo(BaseModel):
+    name: str
+    short_sha: str
+    date: str
+    is_task_branch: bool
+
+
+class DiffResponse(BaseModel):
+    diff: str
+    files_changed: int
+    insertions: int
+    deletions: int
+
+
+class CommitResponse(BaseModel):
+    sha: str
+    message: str
+
+
+class PRResponse(BaseModel):
+    pr_url: str
+    pr_number: int
+
+
+class WorktreeCreateRequest(BaseModel):
+    task_id: str
+    base_branch: str = "main"
+
+
+class CommitRequest(BaseModel):
+    message: str
 
 
 # ── Activity log ────────────────────────────────────────────────────────────

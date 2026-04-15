@@ -1,11 +1,16 @@
 import type {
+  BranchInfo,
+  CommitResponse,
+  DiffResponse,
   PipelineStatus,
+  PRResponse,
   SSEEvent,
   Task,
   TaskCreate,
   TaskListResponse,
   TaskRawResponse,
   TaskSSEEvent,
+  WorktreeInfo,
 } from '../types';
 
 const BASE = '/api';
@@ -124,6 +129,23 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(opts),
       }),
+  },
+  git: {
+    worktrees: () => request<WorktreeInfo[]>('/git'),
+    branches: () => request<BranchInfo[]>('/git/branches'),
+    createWorktree: (taskId: string, baseBranch?: string) =>
+      request<WorktreeInfo>('/git/worktree', {
+        method: 'POST',
+        body: JSON.stringify({ task_id: taskId, base_branch: baseBranch ?? 'main' }),
+      }),
+    removeWorktree: (taskId: string) => request<void>(`/git/worktree/${taskId}`, { method: 'DELETE' }),
+    diff: (taskId: string) => request<DiffResponse>(`/git/diff/${taskId}`),
+    commit: (taskId: string, message: string) =>
+      request<CommitResponse>(`/git/commit/${taskId}`, {
+        method: 'POST',
+        body: JSON.stringify({ message }),
+      }),
+    createPR: (taskId: string) => request<PRResponse>(`/git/pr/${taskId}`, { method: 'POST' }),
   },
   dashboard: {
     get: () => request<import('../types').DashboardData>('/dashboard'),

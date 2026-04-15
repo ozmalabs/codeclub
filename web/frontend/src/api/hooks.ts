@@ -11,6 +11,14 @@ function invalidateTaskQueries(qc: ReturnType<typeof useQueryClient>, id?: strin
   }
 }
 
+function invalidateGitQueries(qc: ReturnType<typeof useQueryClient>, taskId?: string) {
+  void qc.invalidateQueries({ queryKey: ['git-worktrees'] });
+  void qc.invalidateQueries({ queryKey: ['git-branches'] });
+  if (taskId) {
+    void qc.invalidateQueries({ queryKey: ['git-diff', taskId] });
+  }
+}
+
 export function useDashboard() {
   return useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard.get, refetchInterval: 5000 });
 }
@@ -110,6 +118,68 @@ export function useHardware() {
 
 export function useSmashModels() {
   return useQuery({ queryKey: ['smash-models'], queryFn: api.smash.models });
+}
+
+export function useGitWorktrees() {
+  return useQuery({ queryKey: ['git-worktrees'], queryFn: api.git.worktrees, refetchInterval: 5000 });
+}
+
+export function useGitBranches() {
+  return useQuery({ queryKey: ['git-branches'], queryFn: api.git.branches, refetchInterval: 10000 });
+}
+
+export function useGitDiff(taskId: string, enabled = true) {
+  return useQuery({
+    queryKey: ['git-diff', taskId],
+    queryFn: () => api.git.diff(taskId),
+    enabled: enabled && Boolean(taskId),
+    refetchInterval: enabled ? 5000 : false,
+  });
+}
+
+export function useCreateWorktree() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskId, baseBranch }: { taskId: string; baseBranch?: string }) =>
+      api.git.createWorktree(taskId, baseBranch),
+    onSuccess: (_worktree, variables) => {
+      invalidateGitQueries(qc, variables.taskId);
+      invalidateTaskQueries(qc, variables.taskId);
+    },
+  });
+}
+
+export function useRemoveWorktree() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (taskId: string) => api.git.removeWorktree(taskId),
+    onSuccess: (_result, taskId) => {
+      invalidateGitQueries(qc, taskId);
+      invalidateTaskQueries(qc, taskId);
+    },
+  });
+}
+
+export function useCommitTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskId, message }: { taskId: string; message: string }) => api.git.commit(taskId, message),
+    onSuccess: (_commit, variables) => {
+      invalidateGitQueries(qc, variables.taskId);
+      invalidateTaskQueries(qc, variables.taskId);
+    },
+  });
+}
+
+export function useCreatePR() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (taskId: string) => api.git.createPR(taskId),
+    onSuccess: (_pr, taskId) => {
+      invalidateGitQueries(qc, taskId);
+      invalidateTaskQueries(qc, taskId);
+    },
+  });
 }
 
 export function useSettings() {

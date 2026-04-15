@@ -136,6 +136,37 @@ export interface SmashGridPoint {
   efficiency: number;
 }
 
+export interface WorktreeInfo {
+  path: string;
+  branch: string;
+  head: string;
+  is_task: boolean;
+}
+
+export interface BranchInfo {
+  name: string;
+  short_sha: string;
+  date: string;
+  is_task_branch: boolean;
+}
+
+export interface DiffResponse {
+  diff: string;
+  files_changed: number;
+  insertions: number;
+  deletions: number;
+}
+
+export interface CommitResponse {
+  sha: string;
+  message: string;
+}
+
+export interface PRResponse {
+  pr_url: string;
+  pr_number: number;
+}
+
 export interface DashboardData {
   queue_depth: number;
   active_runs: number;

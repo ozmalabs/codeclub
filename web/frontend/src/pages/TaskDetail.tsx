@@ -2,9 +2,27 @@ import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import { subscribeTaskSSE } from '../api/client';
-import { useCancelTask, useRunTask, useTask } from '../api/hooks';
+import {
+  useCancelTask,
+  useCommitTask,
+  useCreatePR,
+  useCreateWorktree,
+  useGitDiff,
+  useRunTask,
+  useTask,
+} from '../api/hooks';
 import { CostBadge, StatusBadge } from '../components/StatusBadge';
-import type { Phase, PhaseInfo, ReviewResult, Task, TaskSSEEvent, TaskStatus } from '../types';
+import type {
+  CommitResponse,
+  DiffResponse,
+  Phase,
+  PhaseInfo,
+  PRResponse,
+  ReviewResult,
+  Task,
+  TaskSSEEvent,
+  TaskStatus,
+} from '../types';
 
 const PHASE_ORDER: Phase[] = ['spec', 'generate', 'test', 'review', 'fix', 'commit'];
 
@@ -60,6 +78,16 @@ function liveLogColor(tone: LiveLogEntry['tone']) {
   }
 }
 
+function diffLineClass(line: string) {
+  if (line.startsWith('+') && !line.startsWith('+++')) {
+    return 'bg-emerald-950/60 text-emerald-200';
+  }
+  if (line.startsWith('-') && !line.startsWith('---')) {
+    return 'bg-red-950/60 text-red-200';
+  }
+  return 'text-slate-300';
+}
+
 function PhasePipeline({ phases }: { phases: PhaseInfo[] }) {
   const phaseMap = new Map(phases.map((phase) => [phase.phase, phase]));
 
@@ -110,19 +138,62 @@ function KV({ label, children }: { label: string; children: React.ReactNode }) {
   );
 }
 
+function DiffViewer({ diff }: { diff: string }) {
+  if (!diff.trim()) {
+    return <p className="text-sm text-slate-500">No diff yet. Caveman see clean branch.</p>;
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-lg border border-slate-700 bg-slate-950 font-mono text-xs">
+      {diff.split('\n').map((line, index) => (
+        <div key={`${index}-${line}`} className={`whitespace-pre px-3 py-0.5 ${diffLineClass(line)}`}>
+          {line || ' '}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DiffSummary({ diff }: { diff: DiffResponse }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+      <span>{diff.files_changed} files changed</span>
+      <span className="text-emerald-300">+{diff.insertions}</span>
+      <span className="text-red-300">-{diff.deletions}</span>
+    </div>
+  );
+}
+
 function TaskDetailContent({ task }: { task: Task }) {
   const qc = useQueryClient();
   const runTask = useRunTask();
   const cancelTask = useCancelTask();
+  const createWorktree = useCreateWorktree();
+  const commitTask = useCommitTask();
+  const createPR = useCreatePR();
   const [streamPhases, setStreamPhases] = useState<PhaseInfo[] | null>(null);
   const [streamCode, setStreamCode] = useState<string | null>(null);
   const [streamTestOutput, setStreamTestOutput] = useState<string | null>(null);
   const [streamReview, setStreamReview] = useState<ReviewResult | null>(null);
   const [liveEntries, setLiveEntries] = useState<LiveLogEntry[]>([]);
   const [streamConnected, setStreamConnected] = useState(false);
+  const [showDiff, setShowDiff] = useState(false);
+  const [baseBranch, setBaseBranch] = useState('main');
+  const [commitMessage, setCommitMessage] = useState('');
+  const [commitResult, setCommitResult] = useState<CommitResponse | null>(null);
+  const [prResult, setPrResult] = useState<PRResponse | null>(null);
   const liveLogRef = useRef<HTMLDivElement | null>(null);
   const liveEntryId = useRef(0);
   const isActive = isStreamingStatus(task.status);
+  const hasWorktree = Boolean(task.worktree_path);
+  const prUrl = prResult?.pr_url ?? task.pr_url;
+  const diffQuery = useGitDiff(task.id, task.git_enabled && hasWorktree && showDiff);
+
+  useEffect(() => {
+    if (!commitMessage.trim()) {
+      setCommitMessage(`task(${task.id}): ${task.title}`);
+    }
+  }, [commitMessage, task.id, task.title]);
 
   useEffect(() => {
     if (!isActive) {
@@ -207,6 +278,23 @@ function TaskDetailContent({ task }: { task: Task }) {
   const showCode = Boolean(code) || phases.some((phase) => phase.phase === 'generate' && phase.status !== 'pending');
   const showTestOutput = Boolean(testOutput) || phases.some((phase) => phase.phase === 'test' && phase.status !== 'pending');
 
+  async function handleCreateWorktree() {
+    const worktree = await createWorktree.mutateAsync({ taskId: task.id, baseBranch: baseBranch.trim() || 'main' });
+    if (worktree.branch) {
+      setShowDiff(true);
+    }
+  }
+
+  async function handleCommit() {
+    const result = await commitTask.mutateAsync({ taskId: task.id, message: commitMessage.trim() });
+    setCommitResult(result);
+  }
+
+  async function handleCreatePR() {
+    const result = await createPR.mutateAsync(task.id);
+    setPrResult(result);
+  }
+
   return (
     <div className="space-y-6">
       <Link to="/tasks" className="inline-flex items-center gap-1 text-sm text-slate-400 transition-colors hover:text-sky-400">
@@ -276,7 +364,7 @@ function TaskDetailContent({ task }: { task: Task }) {
         <Section title="Live Log">
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-xs text-slate-400">
-              <span className={`h-2.5 w-2.5 rounded-full ${streamConnected ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+              <span className={`h-2.5 w-2.5 rounded-full ${streamConnected ? 'animate-pulse bg-emerald-400' : 'bg-slate-500'}`} />
               <span className={streamConnected ? 'text-emerald-300' : 'text-slate-500'}>
                 {streamConnected ? 'Streaming from pipeline' : 'Connecting to task stream…'}
               </span>
@@ -314,7 +402,7 @@ function TaskDetailContent({ task }: { task: Task }) {
 
       {showCode && (
         <Section title="Generated Code">
-          <pre className="max-h-[32rem] overflow-x-auto overflow-y-auto rounded-lg bg-slate-900 p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap text-emerald-300">
+          <pre className="max-h-[32rem] overflow-x-auto overflow-y-auto whitespace-pre-wrap rounded-lg bg-slate-900 p-4 font-mono text-xs leading-relaxed text-emerald-300">
             {code || '(code available after generation completes)'}
           </pre>
         </Section>
@@ -322,7 +410,7 @@ function TaskDetailContent({ task }: { task: Task }) {
 
       {showTestOutput && (
         <Section title="Test Output">
-          <pre className="max-h-64 overflow-x-auto overflow-y-auto rounded-lg bg-slate-900 p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap text-slate-300">
+          <pre className="max-h-64 overflow-x-auto overflow-y-auto whitespace-pre-wrap rounded-lg bg-slate-900 p-4 font-mono text-xs leading-relaxed text-slate-300">
             {testOutput || '(no test output captured)'}
           </pre>
         </Section>
@@ -383,23 +471,139 @@ function TaskDetailContent({ task }: { task: Task }) {
 
       {task.git_enabled && (
         <Section title="Git">
-          <div className="space-y-2">
-            {task.branch && (
-              <KV label="Branch">
-                <code className="rounded bg-slate-900 px-1.5 py-0.5 text-xs text-sky-400">{task.branch}</code>
-              </KV>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              {task.branch && (
+                <KV label="Branch">
+                  <code className="rounded bg-slate-900 px-1.5 py-0.5 text-xs text-sky-400">{task.branch}</code>
+                </KV>
+              )}
+              {task.worktree_path ? (
+                <KV label="Worktree">
+                  <code className="font-mono text-xs text-slate-400">{task.worktree_path}</code>
+                </KV>
+              ) : (
+                <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/60 p-4">
+                  <p className="text-sm text-slate-400">No worktree yet. Caveman need branch cave before commit and PR.</p>
+                  <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
+                    <input
+                      type="text"
+                      value={baseBranch}
+                      onChange={(e) => setBaseBranch(e.target.value)}
+                      placeholder="Base branch"
+                      className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none md:max-w-xs"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handleCreateWorktree()}
+                      disabled={createWorktree.isPending}
+                      className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-600"
+                    >
+                      {createWorktree.isPending ? 'Creating…' : 'Create Worktree'}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {prUrl && (
+                <KV label="PR">
+                  <a href={prUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-sky-400 underline hover:text-sky-300">
+                    {prUrl}
+                  </a>
+                </KV>
+              )}
+            </div>
+
+            {(createWorktree.isError || commitTask.isError || createPR.isError || diffQuery.isError) && (
+              <div className="space-y-1 text-sm text-red-400">
+                {createWorktree.isError && <p>{(createWorktree.error as Error).message}</p>}
+                {commitTask.isError && <p>{(commitTask.error as Error).message}</p>}
+                {createPR.isError && <p>{(createPR.error as Error).message}</p>}
+                {diffQuery.isError && <p>{(diffQuery.error as Error).message}</p>}
+              </div>
             )}
-            {task.worktree_path && (
-              <KV label="Worktree">
-                <code className="font-mono text-xs text-slate-400">{task.worktree_path}</code>
-              </KV>
-            )}
-            {task.pr_url && (
-              <KV label="PR">
-                <a href={task.pr_url} target="_blank" rel="noopener noreferrer" className="text-xs text-sky-400 underline hover:text-sky-300">
-                  {task.pr_url}
-                </a>
-              </KV>
+
+            {hasWorktree && (
+              <>
+                <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <h4 className="text-sm font-semibold text-slate-200">Commit cave changes</h4>
+                      <p className="mt-1 text-xs text-slate-500">Make one tidy commit before shiny PR button.</p>
+                    </div>
+                    <div className="flex flex-col gap-3 lg:w-[32rem] lg:flex-row">
+                      <input
+                        type="text"
+                        value={commitMessage}
+                        onChange={(e) => setCommitMessage(e.target.value)}
+                        placeholder="Commit message"
+                        className="flex-1 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void handleCommit()}
+                        disabled={!commitMessage.trim() || commitTask.isPending}
+                        className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-600"
+                      >
+                        {commitTask.isPending ? 'Committing…' : 'Commit'}
+                      </button>
+                    </div>
+                  </div>
+                  {commitResult && (
+                    <p className="mt-3 text-xs text-emerald-300">
+                      Commit ready: <code>{commitResult.sha}</code> — {commitResult.message}
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <h4 className="text-sm font-semibold text-slate-200">Pull Request</h4>
+                      <p className="mt-1 text-xs text-slate-500">Open branch to rest of tribe.</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleCreatePR()}
+                      disabled={Boolean(prUrl) || createPR.isPending}
+                      className="rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-600"
+                    >
+                      {createPR.isPending ? 'Opening…' : prUrl ? 'PR Created' : 'Create PR'}
+                    </button>
+                  </div>
+                  {prResult && (
+                    <p className="mt-3 text-xs text-emerald-300">Opened PR #{prResult.pr_number}</p>
+                  )}
+                </div>
+
+                <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
+                  <button
+                    type="button"
+                    onClick={() => setShowDiff((current) => !current)}
+                    className="flex w-full items-center justify-between gap-3 text-left"
+                  >
+                    <div>
+                      <h4 className="text-sm font-semibold text-slate-200">Diff Viewer</h4>
+                      <p className="mt-1 text-xs text-slate-500">Peek changes without leaving cave.</p>
+                    </div>
+                    <span className="text-sm text-sky-400">{showDiff ? 'Hide diff ▲' : 'Show diff ▼'}</span>
+                  </button>
+
+                  {showDiff && (
+                    <div className="mt-4 space-y-3">
+                      {diffQuery.isLoading ? (
+                        <div className="h-40 animate-pulse rounded-lg border border-slate-700 bg-slate-950" />
+                      ) : diffQuery.data ? (
+                        <>
+                          <DiffSummary diff={diffQuery.data} />
+                          <DiffViewer diff={diffQuery.data.diff} />
+                        </>
+                      ) : (
+                        <p className="text-sm text-slate-500">No diff data yet.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
         </Section>

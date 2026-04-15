@@ -6,6 +6,7 @@ import TaskDetail from './pages/TaskDetail';
 import Models from './pages/Models';
 import SmashMaps from './pages/SmashMaps';
 import Tournament from './pages/Tournament';
+import Git from './pages/Git';
 import Hardware from './pages/Hardware';
 import Settings from './pages/Settings';
 
@@ -19,6 +20,7 @@ export default function App() {
         <Route path="models" element={<Models />} />
         <Route path="maps" element={<SmashMaps />} />
         <Route path="tournament" element={<Tournament />} />
+        <Route path="git" element={<Git />} />
         <Route path="hardware" element={<Hardware />} />
         <Route path="settings" element={<Settings />} />
       </Route>
