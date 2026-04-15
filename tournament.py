@@ -1030,6 +1030,313 @@ def compare_strategies(
     return "\n".join(lines)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PARALLELISM — fan-out decomposition
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# A task scored as oneshot(d=45, c=65) can instead be decomposed:
+#   1× map(d=35, c=70) → skeleton/interface    (sequential, bigger model)
+#   N× fill(d=25, c=90) → function bodies      (parallel, smaller model)
+#
+# Each fill is easier AND clearer → smaller models handle them.
+# And they're concurrent → wallclock ≈ map_time + max(fill_time).
+#
+# The decomposability score estimates how many independent fill subtasks
+# a task can be split into. Higher = more parallelizable.
+
+
+def estimate_decomposability(
+    description: str = "",
+    n_methods: int = 1,
+    base_difficulty: int = 35,
+    spec_clarity: int | None = None,
+) -> float:
+    """
+    Estimate how parallelizable a task is (1.0–10.0).
+
+    1.0 = monolithic, cannot decompose (single function, tight coupling)
+    2.0–4.0 = typical class with independent methods
+    5.0–10.0 = highly decomposable (many independent endpoints, utilities)
+
+    Heuristics:
+    - More methods → more fill subtasks
+    - Higher difficulty → more benefit from decomposition
+    - Keywords signal structure (CRUD, REST, etc.)
+    """
+    score = max(1.0, float(n_methods))
+
+    # Difficulty bonus: harder tasks benefit more from decomposition
+    if base_difficulty >= 50:
+        score *= 1.3
+    elif base_difficulty >= 35:
+        score *= 1.1
+
+    # Keyword signals for decomposability
+    desc_lower = description.lower()
+    parallel_signals = [
+        "crud", "rest", "endpoints", "routes", "handlers",
+        "utilities", "helpers", "operations", "commands",
+        "batch", "pipeline", "stages", "steps",
+    ]
+    for signal in parallel_signals:
+        if signal in desc_lower:
+            score *= 1.2
+            break
+
+    # Monolithic signals: tightly coupled, hard to decompose
+    monolithic_signals = [
+        "state machine", "recursive", "backtrack", "single function",
+        "monolith", "tightly coupled", "sequential",
+    ]
+    for signal in monolithic_signals:
+        if signal in desc_lower:
+            score *= 0.6
+            break
+
+    return max(1.0, min(10.0, score))
+
+
+@dataclass
+class DecomposedPlan:
+    """A task broken into map + parallel fills."""
+    original_coord: SmashCoord
+    map_coord: SmashCoord
+    fill_coord: SmashCoord
+    n_fills: int                    # number of parallel fill subtasks
+    decomposability: float          # 1.0–10.0
+
+
+@dataclass
+class ParallelEstimate:
+    """Cost/time comparison: oneshot vs decomposed (map + N×fill)."""
+    # Oneshot approach
+    oneshot_model: str
+    oneshot_quality: float
+    oneshot_time_s: float
+    oneshot_cost_usd: float
+    oneshot_compound: float
+
+    # Decomposed approach
+    map_model: str
+    fill_model: str
+    n_fills: int
+    map_quality: float
+    fill_quality: float
+    combined_quality: float         # map × fill (both must succeed)
+    sequential_time_s: float        # map + n_fills × fill (no parallelism)
+    parallel_time_s: float          # map + max(fill)
+    total_cost_usd: float
+    decomposed_compound: float
+
+    # Comparison
+    speedup: float                  # oneshot_time / parallel_time
+    cost_ratio: float               # oneshot_cost / decomposed_cost
+    quality_delta: float            # decomposed - oneshot quality
+
+
+def decompose_task(
+    coord: SmashCoord,
+    n_methods: int = 3,
+    description: str = "",
+) -> DecomposedPlan:
+    """
+    Decompose a task into map + parallel fills.
+
+    Uses role_coord() to derive the map and fill coordinates from the
+    original task's base difficulty.
+    """
+    decomp = estimate_decomposability(
+        description=description,
+        n_methods=n_methods,
+        base_difficulty=coord.difficulty,
+    )
+    n_fills = max(1, round(decomp))
+
+    map_coord = role_coord(coord.difficulty, "map")
+    fill_coord = role_coord(coord.difficulty, "fill")
+
+    return DecomposedPlan(
+        original_coord=coord,
+        map_coord=map_coord,
+        fill_coord=fill_coord,
+        n_fills=n_fills,
+        decomposability=decomp,
+    )
+
+
+def estimate_parallel(
+    coord: SmashCoord,
+    contenders: list["Contender"],
+    lang: str = "python",
+    n_methods: int = 3,
+    description: str = "",
+    hw_profile: str = "gpu_consumer",
+    cloud_speed_modifier: float = 1.0,
+    speed_weight: float = 0.5,
+    min_quality: float = 0.5,
+) -> ParallelEstimate:
+    """
+    Compare oneshot vs decomposed (map + N×fill) for a single task.
+
+    Picks the best model for each role independently.
+    """
+    plan = decompose_task(coord, n_methods=n_methods, description=description)
+
+    # Best oneshot model
+    oneshot_rec = recommend_routing(
+        coord, contenders, lang=lang, hw_profile=hw_profile,
+        cloud_speed_modifier=cloud_speed_modifier,
+        speed_weight=speed_weight, min_quality=min_quality,
+    )
+    oneshot = oneshot_rec.best_compound
+
+    # Best map model: quality is king here — a bad skeleton ruins all fills.
+    # Use higher min_quality and prefer quality over compound efficiency.
+    map_est = estimate_task(
+        plan.map_coord, contenders, lang=lang,
+        hw_profile=hw_profile,
+        cloud_speed_modifier=cloud_speed_modifier,
+        speed_weight=speed_weight,
+    )
+    map_min = max(min_quality, 0.7)  # map needs to be reliable
+    map_viable = [e for e in map_est if e.quality >= map_min]
+    if not map_viable:
+        map_viable = [e for e in map_est if e.quality >= min_quality]
+    if not map_viable:
+        map_viable = map_est
+    map_pick = max(map_viable, key=lambda e: e.quality * 0.7 + e.compound_eff * 0.3 / 100)
+
+    # Best fill model: value is king here — fills are easy, just be cheap.
+    # The fill coord is much easier (d-10, c=90), so small models shine.
+    fill_est = estimate_task(
+        plan.fill_coord, contenders, lang=lang,
+        hw_profile=hw_profile,
+        cloud_speed_modifier=cloud_speed_modifier,
+        speed_weight=0.0,  # pure value for fills — speed comes from parallelism
+    )
+    fill_viable = [e for e in fill_est if e.quality >= min_quality]
+    fill_pick = max(fill_viable, key=lambda e: e.value_eff) if fill_viable else fill_est[0]
+
+    # Combined quality: both map AND fill must succeed
+    combined_quality = map_pick.quality * fill_pick.quality
+
+    # Time: map is sequential, fills are parallel
+    seq_time = map_pick.time_s + plan.n_fills * fill_pick.time_s
+    par_time = map_pick.time_s + fill_pick.time_s  # map + one fill (parallel)
+
+    # Cost: map + all fills
+    total_cost = map_pick.cost_usd + plan.n_fills * fill_pick.cost_usd
+
+    # Compound efficiency for the decomposed approach
+    decomposed_compound = compound_efficiency(
+        quality=combined_quality,
+        tok_s=(fill_pick.tokens / max(par_time, 0.1)),  # effective throughput
+        cost_input=0, cost_output=0,  # we already have total cost
+        coord=coord,
+        speed_weight=speed_weight,
+    )
+    # Recalculate using actual cost since we bypassed the cost model
+    import math
+    cost_score = 1.0 / (1.0 + total_cost / COST_TAU)
+    speed_score = math.exp(-par_time / SPEED_TAU)
+    speed_factor = (speed_score * 100 / 100.0) ** speed_weight if speed_weight > 0 else 1.0
+    decomposed_compound = combined_quality * cost_score * speed_factor * 100.0
+
+    speedup = oneshot.time_s / par_time if par_time > 0 else 1.0
+    cost_ratio = oneshot.cost_usd / total_cost if total_cost > 0 else 1.0
+
+    return ParallelEstimate(
+        oneshot_model=oneshot.model,
+        oneshot_quality=oneshot.quality,
+        oneshot_time_s=oneshot.time_s,
+        oneshot_cost_usd=oneshot.cost_usd,
+        oneshot_compound=oneshot.compound_eff,
+        map_model=map_pick.model,
+        fill_model=fill_pick.model,
+        n_fills=plan.n_fills,
+        map_quality=map_pick.quality,
+        fill_quality=fill_pick.quality,
+        combined_quality=combined_quality,
+        sequential_time_s=seq_time,
+        parallel_time_s=par_time,
+        total_cost_usd=total_cost,
+        decomposed_compound=decomposed_compound,
+        speedup=speedup,
+        cost_ratio=cost_ratio,
+        quality_delta=combined_quality - oneshot.quality,
+    )
+
+
+def format_parallel_estimate(est: ParallelEstimate) -> str:
+    """Format a parallel estimate comparison for terminal display."""
+    lines = [
+        "Oneshot vs Decomposed (map + parallel fills)",
+        "─" * 60,
+        f"  Oneshot:  {est.oneshot_model:<22s} "
+        f"q={est.oneshot_quality:.0%}  t={est.oneshot_time_s:.1f}s  "
+        f"${est.oneshot_cost_usd:.5f}  eff={est.oneshot_compound:.1f}",
+        f"  Map:      {est.map_model:<22s} "
+        f"q={est.map_quality:.0%}",
+        f"  Fill ×{est.n_fills}:  {est.fill_model:<22s} "
+        f"q={est.fill_quality:.0%}",
+        f"  Combined: q={est.combined_quality:.0%}  "
+        f"t={est.parallel_time_s:.1f}s (seq {est.sequential_time_s:.1f}s)  "
+        f"${est.total_cost_usd:.5f}  eff={est.decomposed_compound:.1f}",
+        "─" * 60,
+        f"  Speedup:     {est.speedup:.1f}×",
+        f"  Cost ratio:  {est.cost_ratio:.1f}× {'cheaper' if est.cost_ratio > 1 else 'more expensive'}",
+        f"  Quality:     {est.quality_delta:+.0%}",
+    ]
+    return "\n".join(lines)
+
+
+def estimate_project_parallel(
+    tasks: list[tuple[SmashCoord, str, int, str]],
+    contenders: list["Contender"],
+    hw_profile: str = "gpu_consumer",
+    speed_weight: float = 0.5,
+    min_quality: float = 0.5,
+) -> str:
+    """
+    Compare oneshot vs decomposed across a project.
+
+    tasks: list of (coord, lang, n_methods, description)
+    """
+    oneshot_cost = 0.0
+    oneshot_time = 0.0
+    decomp_cost = 0.0
+    decomp_par_time = 0.0
+    oneshot_quals = []
+    decomp_quals = []
+
+    for coord, lang, n_methods, desc in tasks:
+        est = estimate_parallel(
+            coord, contenders, lang=lang, n_methods=n_methods,
+            description=desc, hw_profile=hw_profile,
+            speed_weight=speed_weight, min_quality=min_quality,
+        )
+        oneshot_cost += est.oneshot_cost_usd
+        oneshot_time += est.oneshot_time_s
+        decomp_cost += est.total_cost_usd
+        decomp_par_time += est.parallel_time_s
+        oneshot_quals.append(est.oneshot_quality)
+        decomp_quals.append(est.combined_quality)
+
+    n = len(tasks)
+    lines = [
+        f"Project: {n} tasks — Oneshot vs Decomposed",
+        "─" * 60,
+        f"  {'':20s} {'Oneshot':>12s} {'Decomposed':>12s} {'Δ':>10s}",
+        f"  {'Cost':20s} ${oneshot_cost:>11.4f} ${decomp_cost:>11.4f} "
+        f"  {decomp_cost/oneshot_cost:.1f}×" if oneshot_cost > 0 else "",
+        f"  {'Seq time':20s} {oneshot_time:>11.1f}s {decomp_par_time:>11.1f}s "
+        f"  {oneshot_time/decomp_par_time:.1f}× faster" if decomp_par_time > 0 else "",
+        f"  {'Avg quality':20s} {sum(oneshot_quals)/n:>11.0%} {sum(decomp_quals)/n:>11.0%} "
+        f"  {(sum(decomp_quals)-sum(oneshot_quals))/n:+.0%}",
+    ]
+    return "\n".join(l for l in lines if l)
+
+
 def estimate_query_coords(
     description: str,
     role: str = "oneshot",
