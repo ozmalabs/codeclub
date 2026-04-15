@@ -164,10 +164,57 @@ export interface TournamentResult {
   created_at: string;
 }
 
+export interface TournamentTask {
+  name: string;
+  lang: string;
+  base_difficulty: number;
+  num_tests: number;
+  description: string;
+}
+
+export interface LeaderboardEntry {
+  model: string;
+  wins: number;
+  avg_fitness: number;
+  avg_cost: number;
+  best_task: string;
+}
+
+export interface TournamentStartOpts {
+  task_id?: string;
+  optimize?: 'balanced' | 'fastest' | 'greenest' | 'cheapest';
+  quick?: boolean;
+}
+
+export interface TournamentFightResult {
+  task_id: string;
+  mode: string;
+  model: string;
+  mapper: string | null;
+  quality: number;
+  tests_passed: number;
+  tests_total: number;
+  elapsed_s: number;
+  cost_usd: number;
+  energy_j: number | null;
+  smash_fit: number;
+  smash_measured: number | null;
+  fitness: number;
+}
+
 // SSE event types
-export type SSEEvent =
+export type TaskSSEEvent =
   | { type: 'phase'; data: PhaseInfo }
   | { type: 'log'; data: { message: string } }
   | { type: 'test'; data: { name: string; passed: boolean; error?: string } }
   | { type: 'code'; data: { code: string } }
+  | { type: 'review'; data: { verdict: string; issues: string[] } }
+  | { type: 'error'; data: { message: string } }
   | { type: 'done'; data: { status: string; quality: number; cost: number } };
+
+export type TournamentSSEEvent =
+  | { type: 'fight'; data: TournamentFightResult }
+  | { type: 'task'; data: { task_id: string; status: string } }
+  | { type: 'done'; data: { champions: number; total_fights: number } };
+
+export type SSEEvent = TaskSSEEvent | TournamentSSEEvent;

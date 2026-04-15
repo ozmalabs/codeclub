@@ -60,6 +60,13 @@ export const api = {
   },
   tournament: {
     results: () => request<import('../types').TournamentResult[]>('/tournament/results'),
+    tasks: () => request<import('../types').TournamentTask[]>('/tournament/tasks'),
+    leaderboard: () => request<import('../types').LeaderboardEntry[]>('/tournament/leaderboard'),
+    start: (opts: import('../types').TournamentStartOpts) =>
+      request<{ status: string; run_id: string }>('/tournament/start', {
+        method: 'POST',
+        body: JSON.stringify(opts),
+      }),
   },
   dashboard: {
     get: () => request<import('../types').DashboardData>('/dashboard'),
@@ -75,7 +82,7 @@ export const api = {
 // SSE helper
 export function subscribeSSE(path: string, onEvent: (event: import('../types').SSEEvent) => void): () => void {
   const source = new EventSource(`${BASE}${path}`);
-  const types = ['phase', 'log', 'test', 'code', 'done'] as const;
+  const types = ['phase', 'log', 'test', 'code', 'review', 'error', 'fight', 'task', 'done'] as const;
   for (const type of types) {
     source.addEventListener(type, (e) => {
       onEvent({ type, data: JSON.parse((e as MessageEvent).data) } as import('../types').SSEEvent);

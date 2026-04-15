@@ -189,8 +189,11 @@ class RoutingDecision(BaseModel):
 # ── Tournament schemas ──────────────────────────────────────────────────────
 
 class TournamentStartRequest(BaseModel):
-    task_ids: list[str] | None = None  # None = all tasks
-    optimize: str = "balanced"
+    task_id: str | None = None
+    optimize: str = Field(
+        default="balanced",
+        pattern="^(balanced|fastest|greenest|cheapest)$",
+    )
     quick: bool = False
 
 
@@ -207,7 +210,47 @@ class FightResultResponse(BaseModel):
     energy_j: float | None
     smash_fit: float
     smash_measured: int
-    fitness: float
+    fitness: float | None = None
+
+
+class TournamentResultResponse(BaseModel):
+    id: int
+    task_id: str
+    mode: str
+    model: str
+    mapper: str | None
+    quality: float | None
+    tests_passed: int | None
+    tests_total: int | None
+    elapsed_s: float | None
+    cost_usd: float | None
+    energy_j: float | None
+    smash_fit: float | None
+    smash_measured: int | None
+    fitness: float | None
+    final_code: str | None
+    test_details: str | None
+    created_at: str
+
+
+class TournamentTaskResponse(BaseModel):
+    id: str
+    name: str
+    lang: str
+    base_difficulty: int
+    num_tests: int
+    description: str
+
+
+class TournamentLeaderboardEntry(BaseModel):
+    model: str
+    wins: int
+    avg_fitness: float | None
+
+
+class TournamentStartResponse(BaseModel):
+    status: str
+    run_id: str
 
 
 # ── Smash / efficiency map schemas ─────────────────────────────────────────

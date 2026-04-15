@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './client';
-import type { TaskCreate } from '../types';
+import type { TaskCreate, TournamentStartOpts } from '../types';
 
 export function useDashboard() {
   return useQuery({ queryKey: ['dashboard'], queryFn: api.dashboard.get, refetchInterval: 5000 });
@@ -67,6 +67,22 @@ export function useUpdateSettings() {
 
 export function useTournamentResults() {
   return useQuery({ queryKey: ['tournament-results'], queryFn: api.tournament.results });
+}
+
+export function useTournamentTasks() {
+  return useQuery({ queryKey: ['tournament-tasks'], queryFn: api.tournament.tasks });
+}
+
+export function useTournamentLeaderboard() {
+  return useQuery({ queryKey: ['tournament-leaderboard'], queryFn: api.tournament.leaderboard });
+}
+
+export function useStartTournament() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (opts: TournamentStartOpts) => api.tournament.start(opts),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tournament-results'] }),
+  });
 }
 
 export function useRuns(taskId?: string) {
