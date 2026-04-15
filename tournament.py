@@ -1420,6 +1420,533 @@ def estimate_project_parallel(
     return "\n".join(l for l in lines if l)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TASK PROFILES — modelling real-world work beyond "write a class"
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Coding benchmarks measure "give it a spec, get code, run tests". But real
+# agent work includes sysadmin, debugging, and cross-codebase tasks where:
+#
+#   1. Context gathering dominates — you read logs, configs, probe services
+#      before you even know what to do. This is token cost with zero progress.
+#   2. Wallclock overhead per iteration is huge — waiting for Docker builds,
+#      service restarts, health checks, CI pipelines. Not token-bound.
+#   3. Iteration loops — try → observe → adjust. Each loop has its own
+#      context gather + wallclock wait. 2-5 iterations is typical; 10+ for
+#      deep debugging.
+#   4. The "code" output is often small — a config change, a flag, a one-liner.
+#      The cost is in finding it, not writing it.
+#   5. Parallelisable in different ways — you CAN probe 5 services at once,
+#      read 10 log files in parallel, but the iteration loop is sequential.
+#
+
+@dataclass
+class TaskProfile:
+    """
+    Characterises a real-world task beyond difficulty/clarity.
+
+    Coding tasks: gather_rounds=0, wallclock_per_iter=0, iterations=1.
+    Sysadmin tasks: gather_rounds=3-10, wallclock_per_iter=30-300s, iterations=2-5.
+    Debug tasks: gather_rounds=5-20, wallclock_per_iter=10-60s, iterations=3-10.
+
+    All fields are estimates; used for cost projection, not execution.
+    """
+    category: str                           # "code", "sysadmin", "debug", "cross-codebase"
+
+    # Context gathering phase: how many rounds of exploration before acting
+    gather_rounds: int = 0                  # number of tool-call rounds to understand the problem
+    tokens_per_gather: int = 2000           # tokens consumed per gather round (reading files, logs)
+    gather_parallelism: int = 1             # how many probes can run concurrently
+
+    # Iteration loop: try → observe → adjust
+    iterations: int = 1                     # expected number of attempt cycles
+    wallclock_per_iter_s: float = 0.0       # seconds of dead time per iteration (builds, deploys)
+    tokens_per_iter: int = 0                # additional tokens per iteration (error analysis, replanning)
+
+    # Output characteristics
+    output_tokens: int = 500                # tokens of actual output (code, config)
+    output_is_config: bool = False          # True if output is config/CLI, not code
+
+    # Risk profile
+    needs_rollback: bool = False            # can the action be undone?
+    destructive: bool = False               # could it cause data loss or downtime?
+    needs_confirmation: bool = False         # should the agent ask before acting?
+
+    def total_tokens(self, coord: SmashCoord) -> int:
+        """Total estimated tokens including gathering and iteration."""
+        base = estimate_token_load(coord)
+        gather = self.gather_rounds * self.tokens_per_gather
+        iteration = self.iterations * self.tokens_per_iter
+        return base + gather + iteration
+
+    def total_wallclock_overhead_s(self) -> float:
+        """Dead wallclock time (builds, deploys) not covered by token generation."""
+        return self.iterations * self.wallclock_per_iter_s
+
+    def gather_wallclock_s(self, tok_s: float = 40.0) -> float:
+        """Wallclock for context gathering phase, accounting for parallelism."""
+        serial_time = (self.gather_rounds * self.tokens_per_gather) / max(tok_s, 1)
+        return serial_time / max(self.gather_parallelism, 1)
+
+    def total_wallclock_s(self, tok_s: float = 40.0) -> float:
+        """Full wallclock: gathering + generation + iteration overhead."""
+        gen_time = self.output_tokens / max(tok_s, 1)
+        return self.gather_wallclock_s(tok_s) + gen_time + self.total_wallclock_overhead_s()
+
+
+# ── Sysadmin task archetypes ──────────────────────────────────────────────────
+# These model the REAL cost structure of ops work. The difficulty/clarity
+# coordinates say "how hard is the actual fix?" — but the profile says
+# "how much exploration and waiting happens around it?"
+
+TASK_PROFILES: dict[str, TaskProfile] = {
+    # ── Code tasks (baseline) ────────────────────────────────────────────
+    "code-simple": TaskProfile(
+        category="code",
+        gather_rounds=0, iterations=1, output_tokens=500,
+    ),
+    "code-moderate": TaskProfile(
+        category="code",
+        gather_rounds=1, tokens_per_gather=1000, iterations=1,
+        output_tokens=1500,
+    ),
+    "code-complex": TaskProfile(
+        category="code",
+        gather_rounds=2, tokens_per_gather=2000, iterations=2,
+        tokens_per_iter=1000, output_tokens=3000,
+    ),
+
+    # ── Sysadmin: container / Docker ─────────────────────────────────────
+    "sysadmin-docker-simple": TaskProfile(
+        category="sysadmin",
+        # "add a volume mount to this container"
+        gather_rounds=2, tokens_per_gather=1500,      # read docker-compose, check running containers
+        iterations=1, wallclock_per_iter_s=30,         # docker compose up
+        output_tokens=200, output_is_config=True,
+    ),
+    "sysadmin-docker-moderate": TaskProfile(
+        category="sysadmin",
+        # "set up Frigate with GPU offload"
+        gather_rounds=5, tokens_per_gather=3000,       # check GPU, drivers, docker runtime, existing configs
+        gather_parallelism=2,                          # can probe GPU and configs in parallel
+        iterations=3, wallclock_per_iter_s=120,        # docker build + restart + health check
+        tokens_per_iter=2000,                          # read error logs, adjust config
+        output_tokens=800, output_is_config=True,
+        needs_confirmation=True,
+    ),
+    "sysadmin-docker-hard": TaskProfile(
+        category="sysadmin",
+        # "migrate multi-service compose to k8s with persistent volumes"
+        gather_rounds=10, tokens_per_gather=4000,      # read all services, volumes, networks, secrets
+        gather_parallelism=3,
+        iterations=5, wallclock_per_iter_s=180,        # apply manifests, wait for pods, check logs
+        tokens_per_iter=3000,
+        output_tokens=3000, output_is_config=True,
+        needs_rollback=True, needs_confirmation=True,
+    ),
+
+    # ── Sysadmin: networking ─────────────────────────────────────────────
+    "sysadmin-network-simple": TaskProfile(
+        category="sysadmin",
+        # "open port 443 and set up nginx reverse proxy"
+        gather_rounds=3, tokens_per_gather=1500,       # check iptables/ufw, existing nginx, certs
+        iterations=2, wallclock_per_iter_s=15,         # reload nginx, test curl
+        tokens_per_iter=1000,
+        output_tokens=400, output_is_config=True,
+    ),
+    "sysadmin-network-moderate": TaskProfile(
+        category="sysadmin",
+        # "set up wireguard VPN between 3 sites with split tunneling"
+        gather_rounds=6, tokens_per_gather=2500,       # check interfaces, routing tables, existing VPN
+        gather_parallelism=2,
+        iterations=4, wallclock_per_iter_s=30,         # restart wg, ping test
+        tokens_per_iter=2000,
+        output_tokens=600, output_is_config=True,
+        needs_confirmation=True,
+    ),
+    "sysadmin-network-hard": TaskProfile(
+        category="sysadmin",
+        # "diagnose intermittent packet loss between services in k8s"
+        gather_rounds=15, tokens_per_gather=3000,      # tcpdump, logs, CNI config, node status
+        gather_parallelism=3,
+        iterations=5, wallclock_per_iter_s=60,         # run diagnostics, wait for repro
+        tokens_per_iter=3000,
+        output_tokens=300, output_is_config=True,
+    ),
+
+    # ── Sysadmin: systemd / services ─────────────────────────────────────
+    "sysadmin-service-simple": TaskProfile(
+        category="sysadmin",
+        # "create a systemd service for my app with auto-restart"
+        gather_rounds=2, tokens_per_gather=1000,
+        iterations=2, wallclock_per_iter_s=10,         # systemctl restart, check status
+        tokens_per_iter=800,
+        output_tokens=300, output_is_config=True,
+    ),
+    "sysadmin-service-moderate": TaskProfile(
+        category="sysadmin",
+        # "set up prometheus + grafana monitoring for 5 services"
+        gather_rounds=6, tokens_per_gather=2000,       # check each service, ports, metrics endpoints
+        gather_parallelism=3,
+        iterations=3, wallclock_per_iter_s=45,         # docker compose, scrape checks
+        tokens_per_iter=1500,
+        output_tokens=1200, output_is_config=True,
+        needs_confirmation=True,
+    ),
+
+    # ── Sysadmin: storage / database ─────────────────────────────────────
+    "sysadmin-db-simple": TaskProfile(
+        category="sysadmin",
+        # "set up automated postgres backups to S3"
+        gather_rounds=3, tokens_per_gather=1500,       # check pg version, existing cron, S3 access
+        iterations=2, wallclock_per_iter_s=60,         # run backup, verify restore
+        tokens_per_iter=1500,
+        output_tokens=500, output_is_config=True,
+    ),
+    "sysadmin-db-hard": TaskProfile(
+        category="sysadmin",
+        # "migrate postgres 14 to 16 with zero downtime using logical replication"
+        gather_rounds=8, tokens_per_gather=3000,       # check schema, extensions, replication slots
+        gather_parallelism=2,
+        iterations=4, wallclock_per_iter_s=300,        # pg_dump/restore or replication setup
+        tokens_per_iter=3000,
+        output_tokens=1000, output_is_config=True,
+        needs_rollback=True, destructive=True, needs_confirmation=True,
+    ),
+
+    # ── Sysadmin: security ───────────────────────────────────────────────
+    "sysadmin-security-audit": TaskProfile(
+        category="sysadmin",
+        # "audit and harden this server — SSH, firewall, fail2ban, unattended-upgrades"
+        gather_rounds=10, tokens_per_gather=2000,      # check sshd_config, iptables, packages, users
+        gather_parallelism=3,
+        iterations=3, wallclock_per_iter_s=20,
+        tokens_per_iter=1500,
+        output_tokens=800, output_is_config=True,
+        needs_confirmation=True,
+    ),
+
+    # ── Debug / troubleshooting ──────────────────────────────────────────
+    "debug-simple": TaskProfile(
+        category="debug",
+        # "why is this test failing?"
+        gather_rounds=3, tokens_per_gather=2000,       # read test, read code, check recent changes
+        iterations=2, wallclock_per_iter_s=10,         # run test
+        tokens_per_iter=1500,
+        output_tokens=300,
+    ),
+    "debug-moderate": TaskProfile(
+        category="debug",
+        # "users report 500 errors on /api/payments — find and fix"
+        gather_rounds=8, tokens_per_gather=3000,       # logs, code, config, recent deploys, DB state
+        gather_parallelism=3,
+        iterations=3, wallclock_per_iter_s=30,         # deploy fix, test
+        tokens_per_iter=2000,
+        output_tokens=500,
+    ),
+    "debug-hard": TaskProfile(
+        category="debug",
+        # "memory leak in production — grows 50MB/hour, no obvious cause"
+        gather_rounds=15, tokens_per_gather=3000,      # heap dumps, profiler output, code review
+        gather_parallelism=2,
+        iterations=5, wallclock_per_iter_s=120,        # deploy candidate fix, observe for minutes
+        tokens_per_iter=3000,
+        output_tokens=400,
+    ),
+
+    # ── Cross-codebase ───────────────────────────────────────────────────
+    "cross-codebase-refactor": TaskProfile(
+        category="cross-codebase",
+        # "rename UserService to AccountService across 200 files"
+        gather_rounds=5, tokens_per_gather=4000,       # find all references, understand patterns
+        gather_parallelism=5,                          # grep is very parallel
+        iterations=2, wallclock_per_iter_s=60,         # run full test suite
+        tokens_per_iter=2000,
+        output_tokens=5000,                            # many small edits
+    ),
+    "cross-codebase-feature": TaskProfile(
+        category="cross-codebase",
+        # "add audit logging to every API endpoint across 3 services"
+        gather_rounds=12, tokens_per_gather=3000,      # understand each service, find all endpoints
+        gather_parallelism=3,
+        iterations=4, wallclock_per_iter_s=90,         # test each service
+        tokens_per_iter=2500,
+        output_tokens=4000,
+    ),
+    "cross-codebase-migration": TaskProfile(
+        category="cross-codebase",
+        # "migrate from REST to gRPC for inter-service communication"
+        gather_rounds=20, tokens_per_gather=4000,      # all service boundaries, message schemas
+        gather_parallelism=4,
+        iterations=6, wallclock_per_iter_s=180,        # integration tests across services
+        tokens_per_iter=3000,
+        output_tokens=8000,
+        needs_rollback=True, needs_confirmation=True,
+    ),
+}
+
+
+def estimate_task_profiled(
+    coord: SmashCoord,
+    profile: TaskProfile,
+    contenders: list["Contender"],
+    lang: str = "python",
+    hw_profile: str = "gpu_consumer",
+    cloud_speed_modifier: float = 1.0,
+    speed_weight: float = 0.5,
+    electricity_rate: float = 0.35,
+) -> list[TaskEstimate]:
+    """
+    Like estimate_task() but uses a TaskProfile for realistic token/time
+    estimation instead of the simple coordinate-based model.
+
+    Accounts for context gathering tokens, iteration overhead, and
+    wallclock dead time (builds, deploys, test runs).
+    """
+    hw = HARDWARE_PROFILES.get(hw_profile, HARDWARE_PROFILES["gpu_consumer"])
+    total_tokens = profile.total_tokens(coord)
+    overhead_s = profile.total_wallclock_overhead_s()
+    estimates: list[TaskEstimate] = []
+
+    for c in contenders:
+        quality = c.smash.fit(
+            coord, lang=lang, lang_proficiency=c.lang_proficiency,
+        )
+
+        if c.is_local:
+            spd_mod = hw.speed_modifier
+            eff_power = c.power_w if c.power_w else hw.power_w
+        else:
+            spd_mod = cloud_speed_modifier
+            eff_power = None
+
+        effective_tok_s = (c.tok_s or 10.0) * spd_mod
+        token_time_s = total_tokens / max(effective_tok_s, 0.1)
+        # Gathering is parallelisable
+        gather_time = profile.gather_wallclock_s(effective_tok_s)
+        gen_time = profile.output_tokens / max(effective_tok_s, 0.1)
+        iter_token_time = (profile.iterations * profile.tokens_per_iter) / max(effective_tok_s, 0.1)
+
+        total_time = gather_time + gen_time + iter_token_time + overhead_s
+
+        # Cost
+        api_cost = (total_tokens * 0.4 * c.cost_input + total_tokens * 0.6 * c.cost_output) / 1e6
+        energy_cost = 0.0
+        energy_j = None
+        if eff_power and eff_power > 0:
+            kwh = (eff_power * token_time_s) / 3_600_000
+            energy_cost = kwh * electricity_rate
+            energy_j = eff_power * token_time_s
+        total_cost = api_cost + energy_cost
+
+        val_eff = value_efficiency(
+            quality=quality, cost_input=c.cost_input, cost_output=c.cost_output,
+            coord=coord, power_w=eff_power, time_s=token_time_s,
+            electricity_rate=electricity_rate,
+        )
+        spd_eff = wallclock_score(
+            tok_s=c.tok_s or 10.0, coord=coord,
+            hw_speed_modifier=spd_mod, cloud_speed_modifier=cloud_speed_modifier,
+        )
+        cmpd = compound_efficiency(
+            quality=quality, tok_s=c.tok_s or 10.0,
+            cost_input=c.cost_input, cost_output=c.cost_output,
+            coord=coord, hw_speed_modifier=spd_mod,
+            cloud_speed_modifier=cloud_speed_modifier,
+            power_w=eff_power, speed_weight=speed_weight,
+            electricity_rate=electricity_rate,
+        )
+
+        estimates.append(TaskEstimate(
+            model=c.name, quality=quality, tokens=total_tokens,
+            time_s=total_time, cost_usd=total_cost,
+            energy_j=energy_j, value_eff=val_eff,
+            speed_eff=spd_eff, compound_eff=cmpd,
+            is_local=c.is_local, hardware=hw.name,
+        ))
+
+    estimates.sort(key=lambda e: e.compound_eff, reverse=True)
+    return estimates
+
+
+def format_profile_comparison(
+    coord: SmashCoord,
+    profiles: dict[str, TaskProfile],
+    contenders: list["Contender"],
+    lang: str = "python",
+    hw_profile: str = "gpu_consumer",
+) -> str:
+    """
+    Compare the same task coordinate across different task profiles.
+
+    Shows how the same d=45/c=70 task looks wildly different as a coding
+    task vs a sysadmin task vs a cross-codebase migration.
+    """
+    lines = [
+        f"Task coordinate: d={coord.difficulty} c={coord.clarity}  (lang={lang})",
+        "",
+        f"{'Profile':<28s} {'Tokens':>7s} {'Gather':>8s} {'Overhead':>9s} "
+        f"{'Best $':>8s} {'Best Time':>10s} {'Model':>20s}",
+        "─" * 95,
+    ]
+    for name, profile in profiles.items():
+        estimates = estimate_task_profiled(
+            coord, profile, contenders, lang=lang, hw_profile=hw_profile,
+        )
+        if not estimates:
+            continue
+        best = estimates[0]
+        gather_s = profile.gather_wallclock_s()
+        overhead_s = profile.total_wallclock_overhead_s()
+        tokens = profile.total_tokens(coord)
+        cost_str = f"${best.cost_usd:.4f}" if best.cost_usd < 0.1 else f"${best.cost_usd:.2f}"
+        time_str = f"{best.time_s:.0f}s" if best.time_s < 3600 else f"{best.time_s/60:.0f}m"
+        lines.append(
+            f"{name:<28s} {tokens:>7d} {gather_s:>7.0f}s {overhead_s:>8.0f}s "
+            f"{cost_str:>8s} {time_str:>10s} {best.model:>20s}"
+        )
+    return "\n".join(lines)
+
+
+# ── Sysadmin task archetype coordinates ───────────────────────────────────────
+# These pair a SmashCoord (the actual fix difficulty) with a TaskProfile
+# (the real-world overhead). The insight: a d=20 "easy fix" with 10 rounds
+# of context gathering is more expensive than a d=50 coding task.
+
+SYSADMIN_ARCHETYPES: dict[str, tuple[SmashCoord, TaskProfile, str]] = {
+    # (coord, profile, human-readable description)
+
+    # ── Easy fixes, big exploration ──────────────────────────────────────
+    "add-volume-mount": (
+        SmashCoord(15, 80),
+        TASK_PROFILES["sysadmin-docker-simple"],
+        "Add a volume mount to an existing docker-compose service",
+    ),
+    "open-firewall-port": (
+        SmashCoord(10, 85),
+        TASK_PROFILES["sysadmin-network-simple"],
+        "Open port 443 and add nginx server block",
+    ),
+    "create-systemd-unit": (
+        SmashCoord(15, 80),
+        TASK_PROFILES["sysadmin-service-simple"],
+        "Create a systemd service for a Python app with auto-restart",
+    ),
+    "fix-failing-test": (
+        SmashCoord(25, 75),
+        TASK_PROFILES["debug-simple"],
+        "Single test failing after recent refactor — find and fix",
+    ),
+
+    # ── Moderate complexity ──────────────────────────────────────────────
+    "setup-gpu-container": (
+        SmashCoord(45, 55),
+        TASK_PROFILES["sysadmin-docker-moderate"],
+        "Set up Frigate NVR container with VAAPI/CUDA GPU offload",
+    ),
+    "wireguard-mesh": (
+        SmashCoord(40, 60),
+        TASK_PROFILES["sysadmin-network-moderate"],
+        "Set up WireGuard VPN between 3 sites with split tunneling",
+    ),
+    "prometheus-stack": (
+        SmashCoord(35, 65),
+        TASK_PROFILES["sysadmin-service-moderate"],
+        "Deploy Prometheus + Grafana monitoring for 5 services",
+    ),
+    "postgres-backup-s3": (
+        SmashCoord(30, 70),
+        TASK_PROFILES["sysadmin-db-simple"],
+        "Set up automated PostgreSQL backups to S3 with verification",
+    ),
+    "production-500s": (
+        SmashCoord(45, 50),
+        TASK_PROFILES["debug-moderate"],
+        "Users report 500 errors on /api/payments — diagnose and fix",
+    ),
+    "rename-across-codebase": (
+        SmashCoord(25, 80),
+        TASK_PROFILES["cross-codebase-refactor"],
+        "Rename UserService to AccountService across 200 files",
+    ),
+
+    # ── Hard tasks ───────────────────────────────────────────────────────
+    "compose-to-k8s": (
+        SmashCoord(65, 45),
+        TASK_PROFILES["sysadmin-docker-hard"],
+        "Migrate 8-service docker-compose to Kubernetes with persistent volumes",
+    ),
+    "debug-packet-loss": (
+        SmashCoord(55, 35),
+        TASK_PROFILES["sysadmin-network-hard"],
+        "Diagnose intermittent packet loss between pods in Kubernetes",
+    ),
+    "postgres-zero-downtime": (
+        SmashCoord(60, 50),
+        TASK_PROFILES["sysadmin-db-hard"],
+        "Migrate PostgreSQL 14→16 with zero downtime via logical replication",
+    ),
+    "security-hardening": (
+        SmashCoord(40, 55),
+        TASK_PROFILES["sysadmin-security-audit"],
+        "Full server hardening — SSH, firewall, fail2ban, unattended-upgrades",
+    ),
+    "memory-leak-production": (
+        SmashCoord(65, 30),
+        TASK_PROFILES["debug-hard"],
+        "Production memory leak — 50MB/hour growth, no obvious cause",
+    ),
+    "audit-logging-feature": (
+        SmashCoord(40, 60),
+        TASK_PROFILES["cross-codebase-feature"],
+        "Add audit logging to every API endpoint across 3 microservices",
+    ),
+    "rest-to-grpc": (
+        SmashCoord(70, 45),
+        TASK_PROFILES["cross-codebase-migration"],
+        "Migrate inter-service communication from REST to gRPC",
+    ),
+}
+
+
+def format_sysadmin_archetypes(
+    contenders: list["Contender"],
+    hw_profile: str = "gpu_consumer",
+) -> str:
+    """Pretty-print cost estimates for all sysadmin archetypes."""
+    lines = [
+        "Sysadmin & Real-World Task Archetypes",
+        "═" * 100,
+        f"{'Task':<30s} {'Cat':>8s} {'d':>3s} {'c':>3s} {'Tokens':>7s} "
+        f"{'Overhead':>8s} {'Cost':>8s} {'Time':>8s} {'Model':>22s}",
+        "─" * 100,
+    ]
+    for name, (coord, profile, desc) in sorted(
+        SYSADMIN_ARCHETYPES.items(),
+        key=lambda x: (x[1][1].category, x[1][0].difficulty),
+    ):
+        estimates = estimate_task_profiled(
+            coord, profile, contenders, hw_profile=hw_profile,
+        )
+        if not estimates:
+            continue
+        best = estimates[0]
+        tokens = profile.total_tokens(coord)
+        overhead = profile.total_wallclock_overhead_s()
+        cost_str = f"${best.cost_usd:.4f}" if best.cost_usd < 0.1 else f"${best.cost_usd:.2f}"
+        time_str = f"{best.time_s:.0f}s" if best.time_s < 600 else f"{best.time_s/60:.1f}m"
+        lines.append(
+            f"{name:<30s} {profile.category:>8s} {coord.difficulty:>3d} {coord.clarity:>3d} "
+            f"{tokens:>7d} {overhead:>7.0f}s {cost_str:>8s} {time_str:>8s} {best.model:>22s}"
+        )
+    lines.append("─" * 100)
+    lines.append("")
+    lines.append("Tokens = gather + generation + iteration (total LLM cost)")
+    lines.append("Overhead = dead wallclock time (builds, deploys, test suites)")
+    lines.append("Time = total wallclock including overhead")
+    return "\n".join(lines)
+
+
 def estimate_query_coords(
     description: str,
     role: str = "oneshot",
