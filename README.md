@@ -351,14 +351,40 @@ Teach your AI agent how to use codeclub. One command. Works everywhere.
 
 | Agent | Install |
 |-------|---------|
+| **Copilot CLI** | `/mcp add codeclub -- python /path/to/codeclub/codeclub/mcp_server.py` |
 | **Claude Code** | `claude plugin install codeclub@codeclub` |
 | **Codex** | Clone repo → `/plugins` → Install |
 | **Gemini CLI** | `gemini extensions install https://github.com/ozmalabs/codeclub` |
 | **Cursor** | `npx skills add ozmalabs/codeclub -a cursor` |
 | **Windsurf** | `npx skills add ozmalabs/codeclub -a windsurf` |
-| **Copilot** | `npx skills add ozmalabs/codeclub -a github-copilot` |
+| **Copilot (VS Code)** | `npx skills add ozmalabs/codeclub -a github-copilot` |
 | **Cline** | `npx skills add ozmalabs/codeclub -a cline` |
+| **Any MCP client** | Add `.mcp.json` from this repo, or run `python -m codeclub.mcp_server` |
 | **Any other** | `npx skills add ozmalabs/codeclub` |
+
+### MCP server (Copilot CLI, Claude Desktop, any MCP client)
+
+The MCP server exposes five tools over stdio:
+
+| Tool | What it does |
+|------|-------------|
+| `classify_task` | Classify any task → category, confidence, suggested profile |
+| `estimate_cost` | Full routing plan → tokens, cost, wallclock, reasoning |
+| `compress_context` | Compress code/text → token savings |
+| `route_model` | Difficulty + clarity → model recommendation |
+| `list_profiles` | Browse 31 task profiles with cost estimates |
+
+```bash
+# Copilot CLI — one command
+/mcp add codeclub -- python -m codeclub.mcp_server
+
+# Or with PYTHONPATH if not in the repo directory
+/mcp add codeclub --env PYTHONPATH=/path/to/codeclub -- python /path/to/codeclub/codeclub/mcp_server.py
+
+# Workspace config — drop .mcp.json in your repo root (already included)
+```
+
+No API keys needed. Classification and routing are pure heuristics — zero LLM calls.
 
 Install once. Agent knows compress, dev loop, and routing APIs from first message.
 

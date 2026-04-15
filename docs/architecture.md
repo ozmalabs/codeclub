@@ -9,6 +9,8 @@
 | `compress` | `expand.py` | Splice LLM output back into original |
 | `compress` | `brevity.py` | Scale-aware output constraints |
 | `compress` | `pipeline.py` | End-to-end compression pipeline |
+| `context` | `proxy.py` | OpenAI-compatible context proxy with routing transparency |
+| — | `mcp_server.py` | MCP server for Copilot CLI / Claude Desktop / any MCP client |
 | `dev` | `loop.py` | Autonomous dev loop, CLI |
 | `dev` | `generate.py` | Two-phase map+fill generation |
 | `dev` | `spec.py` | Task decomposition (spec-kit style) |
@@ -50,6 +52,7 @@
 | `estimate_task_profiled()` | Profile-aware cost/time/quality estimation | `tournament.py` |
 | `compare_context_strategies()` | Deep-dive context savings for a single archetype | `tournament.py` |
 | `TypeScriptRunner` | TS/TSX execution with JSX shim (16 tasks) | `tournament.py` |
+| MCP server | Exposes classify/estimate/compress/route as MCP tools | `codeclub/mcp_server.py` |
 
 ## References
 

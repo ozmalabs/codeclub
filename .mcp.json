@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "codeclub": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "codeclub.mcp_server"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "description": "Task classification, cost estimation, context compression, and model routing for LLM coding agents."
+    }
+  }
+}
