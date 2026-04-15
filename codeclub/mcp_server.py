@@ -719,6 +719,36 @@ def _handle_route(args: dict) -> list[TextContent]:
         result["copilot_total_premium_requests"] = 0
         result["copilot_note"] = "All phases use included models (free on paid plans)"
 
+    # Context strategy depends on billing model
+    has_copilot = any(_copilot_multiplier(m.id) is not None for m in _seeded_models) if _seeded_models else False
+    if has_copilot:
+        result["context_strategy"] = {
+            "approach": "maximise",
+            "rationale": (
+                "Copilot bills per-prompt, not per-token. "
+                "Include ALL relevant context upfront to minimise follow-up prompts. "
+                "Each avoided follow-up saves 1× model multiplier in premium requests."
+            ),
+            "include": [
+                "Full files (not just functions)",
+                "Related files (tests, types, configs)",
+                "Project conventions (AGENTS.md, style guides)",
+                "Recent git history",
+                "Full error output (don't truncate)",
+            ],
+            "compress": False,
+        }
+    else:
+        result["context_strategy"] = {
+            "approach": "compress",
+            "rationale": (
+                "API billing is per-token. Compress context aggressively "
+                "to reduce cost. Use stub_functions for code, structural "
+                "compression for prose."
+            ),
+            "compress": True,
+        }
+
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 

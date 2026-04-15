@@ -121,3 +121,49 @@ When a Copilot CLI user seeds their models, the router knows:
 
 This means a typical moderate coding task uses **0 premium requests** by
 routing everything to included models.
+
+### The context maximisation principle
+
+Since Copilot bills per-prompt (not per-token), and agentic tool calls are
+free, the optimal strategy is the **opposite** of API optimisation:
+
+**Front-load ALL context into the initial prompt.**
+
+Every piece of context you include upfront reduces the chance the agent needs
+to ask a follow-up question (which costs another premium request) or make a
+wrong assumption (which costs an iteration cycle of more prompts). Speculative
+context that the agent *might* need is essentially free to include.
+
+```
+API mindset:    Send minimal context → save tokens → save money
+Copilot mindset: Send MAXIMUM context → fewer prompts → save money
+```
+
+This means codeclub should detect the billing model and flip strategy:
+
+| Billing model | Context strategy | Compression | Prompt strategy |
+|---------------|-----------------|-------------|----------------|
+| API ($/token) | Minimal — compress aggressively | Yes — 70-95% savings | Many small focused calls |
+| Copilot (per-prompt) | Maximal — include everything | No — wastes speed for no cost benefit | Few large comprehensive calls |
+
+#### What "maximum context" means in practice
+
+For a Copilot agent session:
+1. **Include the full file** not just the function — the agent might need
+   surrounding code for type info, imports, patterns
+2. **Include related files** — tests, configs, types that the task might touch
+3. **Include project conventions** — AGENTS.md, style guides, linting rules
+4. **Include recent git history** — what changed recently, what the PR is about
+5. **Include error output in full** — don't truncate stack traces
+
+All of this is free in terms of billing. The only cost is latency (more
+tokens to process), which is usually worth it to avoid a follow-up prompt
+that costs 1-10× premium requests.
+
+#### When compression still helps for Copilot
+
+Compression is still useful for Copilot in specific scenarios:
+- **Rate limit avoidance** — smaller requests are less likely to hit rate limits
+- **Speed** — faster time-to-first-token with less context
+- **Context window limits** — some models cap at 128K-200K tokens
+- **Quality** — extremely large contexts can dilute attention (needle-in-haystack)
