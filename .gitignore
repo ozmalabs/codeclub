@@ -12,3 +12,4 @@ web/data/
 benchmarks/results.db
 benchmarks/results.db-wal
 benchmarks/results.db-shm
+STATE.md
