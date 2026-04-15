@@ -22,6 +22,26 @@
 | `accounting` | `baseline.py` | Savings vs reference model calculations |
 | `benchmarks` | `tiered.py` | Three-way map backend benchmark |
 | `benchmarks` | `llm.py` | Live API benchmark harness |
+| — | `tournament.py` | Model tournament, efficiency maps, compound efficiency, cost estimation, parallelism, language proficiency |
+| — | `smash_viz.py` | Efficiency map visualisation (PNG, HTML, 3D surfaces, value overlays) |
+| — | `smash_server.py` | Interactive HTML efficiency map viewer |
+| — | `bench_tiered.py` | Tiered map backend benchmark runner |
+
+## Key concepts
+
+| Concept | What | Where |
+|---|---|---|
+| `SmashRange` / `SmashCoord` | Two-axis model envelope (difficulty × clarity) | `tournament.py` |
+| `fit()` | Quality prediction: 0.0–1.0 at a coordinate | `SmashRange.fit()` |
+| Compound efficiency | Value × speed blend with hardware profiles | `compound_efficiency()` |
+| Value efficiency | Quality per dollar, speed-independent | `value_efficiency()` |
+| Wallclock score | Speed score with hardware + cloud modifiers | `wallclock_score()` |
+| `HardwareProfile` | Speed modifier + power draw per hardware tier | `HARDWARE_PROFILES` |
+| Cost estimation | Pre-run cost/time/quality prediction per model | `estimate_task()` |
+| Routing recommendation | Best-value / best-speed / best-compound pick | `recommend_routing()` |
+| Project budget | Aggregate cost across tasks with strategy comparison | `estimate_project_budget()` |
+| Decomposition | Map + N×parallel fills, fan-out estimation | `decompose_task()`, `estimate_parallel()` |
+| Language proficiency | Per-model per-language quality multiplier | `MEASURED_LANG_PROFICIENCY` |
 
 ## References
 

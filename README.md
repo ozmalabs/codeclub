@@ -177,6 +177,22 @@ the best quality quant first. Doesn't fit in VRAM? Steps down through
 Q6_K → Q4_K_M → Q3_K_M. Nothing fits on GPU? Falls back to CPU. No internet?
 No problem.
 
+**Plan before you run.** The cost estimator predicts price, time, and quality
+for every model on your task — before spending a single token.
+
+```python
+from tournament import recommend_routing, SmashCoord, build_contenders
+
+rec = recommend_routing(SmashCoord(45, 70), build_contenders(), lang="python")
+rec.best_value     # cheapest correct answer
+rec.best_speed     # fastest correct answer
+rec.best_compound  # best blend
+```
+
+Compare strategies across a whole project: compound routing picks cheap models
+for easy tasks and stronger models for hard ones — $0.004 at 93% quality vs
+$0.031 at 89% using a fixed cloud model.
+
 Example setups (or define your own):
 
 | Setup | What |
@@ -202,10 +218,23 @@ Every model has an efficiency map — like a turbo compressor map. Two axes:
 is where the model is right-sized. Outside it, the model is either overkill or
 overwhelmed.
 
+**Compound efficiency** goes further — separating **value** (quality per dollar)
+from **speed** (wallclock time). A `speed_weight` parameter lets you dial between
+pure value (batch jobs) and speed-critical (interactive coding). Hardware
+profiles (9 tiers from budget CPU to H100) adjust wallclock estimates without
+changing value scores.
+
 The empirical finding: there's a **clarity cliff** around 40. Below it, *every*
 model craters to ~0% regardless of capability. Above 50, even small models hit
 80–100%. This isn't a linear decay — it's a sigmoid. The routing system uses this
 to decide when a vague spec should be uplifted before sending to any model.
+
+**Parallelism.** Some tasks decompose into a skeleton (map) + independent
+function bodies (fills) that run concurrently on cheap models. The system
+estimates decomposability from task structure and compares oneshot vs decomposed
+cost/time. Decomposition wins for many-method tasks (CRUD, REST) where fills
+can use 1.5B models; oneshot wins for tightly-coupled code where cheap models
+already handle it.
 
 Roles aren't special code paths — they're just coordinates on this plane:
 

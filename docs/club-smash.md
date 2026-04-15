@@ -183,6 +183,194 @@ Two gates multiplied:
   slight penalty, sweet spot → ~1.0
 - **Clarity gate**: above min_clarity → 1.0, below → steep penalty
 
+## Language proficiency
+
+Models aren't equally good at every language. `fit()` accepts `lang` and
+`lang_proficiency` to scale the quality gate:
+
+```python
+fit_score = smash.fit(coord, lang="rust", lang_proficiency={"python": 0.98, "rust": 0.87})
+```
+
+15 of 18 benchmarked models have measured proficiency from tournament fights.
+The remaining 3 use a heuristic estimate based on model family and size. Data
+lives in `MEASURED_LANG_PROFICIENCY` — the routing system looks it up
+automatically via `Contender.__post_init__()`.
+
+| Model | Python | Rust | Gap |
+|---|---:|---:|---|
+| gpt-5.4-mini | 98% | 87% | +11pp |
+| claude-sonnet-4.6 | 100% | 82% | +18pp |
+| deepseek-r1 | 63% | **100%** | −33pp (better at Rust!) |
+| devstral-small | 71% | **0%** | complete blindspot |
+
+This is why routing needs a language axis. Sending a Rust task to a model with
+a 0% Rust score wastes money regardless of difficulty/clarity.
+
+## Compound efficiency
+
+The fit function tells you **can this model do it?** — but not **should** it.
+Two models might both score 0.85 fit, but one costs $0.001 and the other
+$0.10. Compound efficiency separates value from speed.
+
+### Two separable axes
+
+**Value efficiency** (0–100): quality per dollar, speed-independent.
+
+```python
+value_efficiency(quality=0.85, cost_input=0.15, cost_output=0.60,
+                 coord=SmashCoord(35, 70))
+# → 91.3  (high quality, very cheap)
+```
+
+A slow model that's cheap and accurate scores high. A fast expensive model
+scores lower. This is the "batch job" metric — you don't care how long it
+takes, only what it costs per correct answer.
+
+**Wallclock score** (0–100): how fast, cost-independent.
+
+```python
+wallclock_score(tok_s=45.0, coord=SmashCoord(35, 70),
+               hw_speed_modifier=2.2)  # RTX 4090
+# → 82.1  (fast on good hardware)
+```
+
+Affected by hardware AND cloud provider load. Same model on a budget CPU
+(0.15×) vs an H100 (5.0×) gives wildly different wallclock scores.
+
+**Compound efficiency** blends them via geometric weighting:
+
+```
+compound = value × (speed / 100) ^ speed_weight
+```
+
+- `speed_weight=0.0` → pure value (overnight batch)
+- `speed_weight=0.5` → balanced (default)
+- `speed_weight=1.0` → speed-critical (interactive coding)
+
+### Curve parameters
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `SPEED_TAU` | 30s | 30s completion ≈ 37% speed score |
+| `COST_TAU` | $0.01 | $0.01/task ≈ 50% cost score |
+
+These control where the sigmoid/exponential curves sit. Sub-penny tasks
+and sub-10-second completions score well; $0.10+ tasks and 60s+ completions
+score poorly.
+
+## Hardware profiles
+
+Hardware affects wallclock time, not value. A model's quality per dollar
+doesn't change on faster hardware — but your wait does.
+
+| Profile | Speed | Power | Description |
+|---|---:|---:|---|
+| `cpu_budget` | 0.15× | 65W | i5 / Ryzen 5, 32GB |
+| `cpu_workstation` | 0.35× | 100W | Xeon / Threadripper, 128GB |
+| `gpu_consumer` | **1.0×** | 150W | RTX 3060 / Arc B580 — **reference** |
+| `gpu_midrange` | 1.5× | 200W | RTX 4070 / Arc B770, 16GB |
+| `gpu_enthusiast` | 2.2× | 350W | RTX 4090 / RTX 5080, 24GB |
+| `gpu_workstation` | 3.0× | 300W | A6000 / L40S, 48GB |
+| `a100` | 3.5× | 400W | A100 80GB SXM |
+| `h100` | 5.0× | 700W | H100 80GB SXM |
+| `cloud_api` | 1.0× | 0W | Provider-managed |
+
+`cloud_speed_modifier` is separate — for provider congestion, rate limits,
+or shared-hardware slowdowns. If your OpenRouter endpoint is under load,
+set `cloud_speed_modifier=0.5`.
+
+## Cost estimation
+
+Given a task coordinate and your hardware, estimate what every model will
+cost before running anything:
+
+```python
+from tournament import estimate_task, recommend_routing, SmashCoord, build_contenders
+
+contenders = build_contenders()
+coord = SmashCoord(difficulty=35, clarity=70)
+
+# Every model ranked by compound efficiency
+estimates = estimate_task(coord, contenders, lang="python",
+                         hw_profile="gpu_consumer")
+
+# Best picks for different goals
+rec = recommend_routing(coord, contenders, min_quality=0.5)
+rec.best_value     # cheapest correct answer
+rec.best_speed     # fastest correct answer
+rec.best_compound  # best blend
+```
+
+### Project budgets
+
+Estimate total cost across multiple tasks with different routing strategies:
+
+```python
+from tournament import estimate_project_budget, compare_strategies
+
+tasks = [
+    (SmashCoord(25, 85), "python"),
+    (SmashCoord(45, 65), "python"),
+    (SmashCoord(60, 55), "rust"),
+]
+
+budget = estimate_project_budget(tasks, contenders, strategy="compound")
+# budget.total_cost_usd, budget.avg_quality, budget.parallel_time_s
+
+# Side-by-side comparison
+print(compare_strategies(tasks, contenders))
+# Strategy                  Tasks       Cost  Seq Time  Par Time  Quality
+# ─────────────────────────────────────────────────────────────────────────
+# value                         3     $0.001     18.2s      6.1s      91%
+# speed                         3     $0.035      5.8s      2.3s      93%
+# compound                      3     $0.004      9.1s      3.5s      93%
+# gpt-5.4-mini                  3     $0.031     12.0s      4.0s      94%
+```
+
+Compound routing automatically picks cheap models for easy tasks and stronger
+models for hard ones — beating fixed-model strategies on cost while matching
+quality.
+
+## Parallelism & decomposition
+
+Some tasks decompose into a skeleton (map) + independent function bodies
+(fills). The fills can run concurrently on cheap models.
+
+```
+oneshot(d=45, c=65) → 1 model, 1 shot
+
+decomposed:
+  1× map(d=45, c=70)  → skeleton     (sequential, quality-weighted)
+  N× fill(d=35, c=90) → bodies       (parallel, pure value)
+```
+
+```python
+from tournament import estimate_parallel, decompose_task
+
+plan = decompose_task(SmashCoord(45, 65), n_methods=5,
+                      description="REST API with CRUD endpoints")
+# plan.n_fills = 6, plan.decomposability = 6.6
+
+est = estimate_parallel(SmashCoord(45, 65), contenders, n_methods=5,
+                        description="REST API with CRUD endpoints")
+# est.speedup, est.cost_ratio, est.quality_delta
+```
+
+**When decomposition wins:**
+- Many independent fills (CRUD, REST endpoints, utility functions)
+- Oneshot requires expensive model but fills can use 1.5B
+- Slow hardware where concurrent fills mask latency
+
+**When oneshot wins:**
+- Simple tasks where cheap models already handle oneshot
+- Tightly coupled code (state machines, recursive algorithms)
+- Few methods — map overhead not worth it
+
+The model correctly shows that smart routing already captures most of
+decomposition's benefit for easy tasks. Decomposition shines for harder tasks
+where the router would otherwise need an expensive frontier model.
+
 ## Heuristic routing
 
 For arbitrary queries (no benchmark data), `estimate_query_coords()` estimates
