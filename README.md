@@ -1,6 +1,7 @@
 # codeclub
 
 > Caveman not have H100. Caveman only have club.
+> But caveman learn which club fit which rock.
 
 ## The story
 
