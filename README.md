@@ -12,12 +12,14 @@ send structure not source, reconstruct on the other side. Beautiful. 70–95% to
 savings. But then I watched my little rnj-1:8b on an Arc B580 nail a rate limiter,
 choke on a parser, and completely die on a vague spec.
 
-Same model. Same hardware. Wildly different results. **The model wasn't the problem.
-The match was.**
+Same model. Same hardware. Wildly different results. The model wasn't the problem
+— the context was. Most of those tokens were function bodies the model never needed
+to see.
 
-That insight led to [clubrouter](https://clubrouter.com) — a routing service that
-picks the right model for every request. But the compression that started it all?
-That's codeclub. **Send less, pay less, get the same result.**
+That insight became codeclub: **strip code to its structure, send less, pay less,
+get the same result.** Tree-sitter parses the AST, replaces bodies with `...`,
+keeps signatures and docstrings. The model works with the shape of your code, not
+the noise. Round-trip expansion puts it all back.
 
 ---
 
@@ -132,21 +134,14 @@ CJK is NOT a shortcut — costs more in cl100k_base.
 
 ---
 
-## MCP tools
+## MCP server
 
-The MCP server exposes one local tool and three optional tools that proxy to
-[clubrouter.com](https://clubrouter.com) for routing:
+The MCP server exposes `compress_context` — no API key, no network, runs locally.
 
-| Tool | Local | What |
-|------|-------|------|
-| `compress_context` | Yes | Tree-sitter stubbing — compress code/text to reduce tokens |
-| `pick_model` | No — clubrouter | Pick cheapest capable model for a task |
-| `classify_task` | No — clubrouter | Classify difficulty, clarity, category |
-| `estimate_cost` | No — clubrouter | Token/cost estimates across available models |
-
-Compression always works locally. Routing tools require a clubrouter.com account —
-set `CLUBROUTER_API_KEY` or run `codeclub login`. Without it, routing tools return
-a helpful setup message.
+If you also use [clubrouter.com](https://clubrouter.com), the MCP server can
+proxy routing tools (`pick_model`, `classify_task`, `estimate_cost`) to it.
+Set `CLUBROUTER_API_KEY` or run `codeclub login` to enable. Without it, only
+compression is available.
 
 ### Agent plugin
 
@@ -196,19 +191,15 @@ npm install @codeclub/mcp-server  # TypeScript MCP server
 ## Docs
 
 - [Compression](docs/compression.md) — tree-sitter stubbing, semantic retrieval, brevity constraints
-- [Benchmarks](docs/benchmarks.md) — full tournament results, reproduction steps, methodology
 - [Architecture](docs/architecture.md) — file map, references
 
-For routing, dev loops, and efficiency maps:
-[clubrouter.com/docs](https://clubrouter.com/docs)
+For model routing, dev loops, and efficiency maps: [clubrouter.com](https://clubrouter.com)
 
 ## References
 
 - [Caveman](https://github.com/juliusbrussee/caveman) — the original insight: you don't need frontier models
-- [arXiv:2307.15337](https://arxiv.org/abs/2307.15337) — Skeleton-of-Thought: Prompting LLMs for Efficient Parallel Generation
-- [arXiv:2604.00025](https://arxiv.org/abs/2604.00025) — Inverse Scaling Can Be Easily Overcome With Scale-Aware Prompting
 - [arXiv:2601.19929](https://arxiv.org/abs/2601.19929) — Stingy Context / TREEFRAG structural compression
-- [Compressor maps](https://en.wikipedia.org/wiki/Compressor_map) — the analogy behind efficiency maps
+- [arXiv:2307.15337](https://arxiv.org/abs/2307.15337) — Skeleton-of-Thought: Prompting LLMs for Efficient Parallel Generation
 
 ---
 
