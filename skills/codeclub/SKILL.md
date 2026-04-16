@@ -1,24 +1,25 @@
 ---
 name: codeclub
 description: >
-  Token compression, autonomous dev loops, and hardware-aware model routing
-  for LLM coding agents. Three tools that compose. Use one, two, or all three.
-  911× cheaper than GPT-4o on real tasks.
-  Use when: compressing context before model calls, generating code from specs,
-  routing between local and cloud models, or any combination.
+  Tree-sitter code compression for LLM agents. Replaces function bodies with
+  `...` stubs, keeping signatures and docstrings. 70–95% fewer tokens, zero
+  quality loss. Supports Python, JS, TS, JSX, TSX, C#.
+  Use when: sending large files to models, compressing context before sub-agent
+  calls, or reducing token costs on any LLM interaction.
 ---
 
 # codeclub
 
 > Caveman not have H100. Caveman only have club.
 
-Three composable tools. Use any combination.
+Code compression that saves 70–95% of tokens with zero quality loss.
 
-| Tool | What | Result |
+| Tool | Local | What |
 |---|---|---|
-| **Compress** | Strip context to what model needs | 70–95% fewer tokens, zero quality loss |
-| **Dev loop** | Spec → generate → test → fix → review | Working code from a sentence |
-| **Route** | Pick right model for hardware | $0 local runs, cloud fallback |
+| **compress_context** | Yes | Tree-sitter stubbing — strip function bodies, keep signatures |
+| **pick_model** | clubrouter | Pick cheapest capable model for a task |
+| **classify_task** | clubrouter | Classify difficulty, clarity, category |
+| **estimate_cost** | clubrouter | Token/cost estimates across models |
 
 ## Compress — send less, pay less
 
@@ -33,7 +34,7 @@ compressed, source_map = stub_functions(code, language="python")
 # 500 lines → 40 lines. SourceMap preserves offsets for round-trip.
 ```
 
-Supports Python, JS, JSX, TS. Language configs pluggable.
+Supports Python, JS, JSX, TS, TSX, C#. Language configs pluggable.
 
 ### Semantic retrieval
 
@@ -65,147 +66,27 @@ patched = expand(original_code, source_map, llm_output)
 Best output constraint: `"No explanation. Code only."` — 100% quality, ~50% fewer output tokens.
 CJK is NOT a shortcut — costs more in cl100k_base.
 
-## Dev loop — spec to working code
+## Routing — via clubrouter.com (optional)
 
-Autonomous write → test → fix → review → report. No agent framework. No orchestration layer.
+Routing, dev loops, and efficiency maps are provided by
+[clubrouter.com](https://clubrouter.com). Set `CLUBROUTER_API_KEY` or run
+`codeclub login` to enable routing tools in the MCP server.
 
-```python
-from codeclub.dev import run
-from codeclub.infra.models import router_for_setup
-
-result = run("Build a RateLimiter class with token bucket algorithm",
-             router=router_for_setup("local_b580"))
-print(result.report)
-print(result.ledger.summary())
-```
-
-### Pipeline
-
-```
-Spec → Map → Fill → TestGen → TestRun → Fix loop → Review → Report
-```
-
-- **Map**: Mid-tier model produces skeleton (signatures + `...`)
-- **Fill**: Each function filled in isolation, in parallel (small model)
-- **Fix loop**: Compress failures → re-fill implicated functions → repeat (1–2 iterations)
-- **Review**: Independent model reviews against spec (different model from generator)
-
-### CLI
-
-```bash
-uv run python dev_loop.py "Build a rate limiter" \
-    --setup local_b580 \
-    --max-iterations 3 \
-    --output rate_limiter.py
-```
-
-### Stack hints
-
-Auto-detect or specify a library stack. Data-driven, no LLM calls.
-Models get exact import names, versions, anti-patterns, and architecture constraints.
-
-```python
-# Auto-detected from task keywords
-result = run("Build a REST API for user management",
-             router=router_for_setup("copilot"))
-
-# Explicit stack
-result = run("Build a CLI tool for NVMeoF devices",
-             router=router_for_setup("local_b580"),
-             stack="cli")
-```
-
-```bash
-# CLI usage
-uv run python dev_loop.py "Build an ETL pipeline" --stack data
-```
-
-Available stacks: `web-api`, `cli`, `data`, `library`, `async-service`.
-
-Each stack includes:
-- Curated libraries with pip names, import names, version constraints
-- Anti-patterns: "don't use flask→use fastapi", "don't use requests→use httpx"
-- Architecture patterns and recommended file structure
-- Test framework hints (pytest, hypothesis, respx)
-
-See `codeclub/stacks.py` for the full registry.
-
-### Accounting
-
-Every run produces a ledger: wallclock, tokens, energy, cost, comparison vs GPT-4o.
-
-```bash
-# UK electricity rate
-uv run python dev_loop.py "..." --electricity-rate 0.28
-```
-
-## Route — club until it fits
-
-Tell codeclub your hardware. It picks models, tries best quant first, steps down
-until something fits. Q6_K → Q4_K_M → Q3_K_M → CPU fallback.
-
-### Setup presets
-
-```python
-from codeclub.infra.models import router_for_setup
-
-router = router_for_setup("local_b580")       # B580 SYCL + Ollama CPU
-router = router_for_setup("copilot")           # GitHub Copilot SDK (free)
-router = router_for_setup("anthropic")         # Direct Anthropic API
-router = router_for_setup("best_local_first")  # Local preferred, cloud fallback
-router = router_for_setup("openrouter_cheap")  # Paid OpenRouter < $0.002/call
-```
-
-### Custom hardware
-
-```python
-from codeclub.infra.hardware import HardwareSetup
-
-hw = HardwareSetup.from_dict({
-    "devices": [
-        {"name": "Intel Arc B580", "vram_mb": 12288, "backend": "sycl",
-         "endpoint": "http://localhost:8081"},
-    ],
-    "ram_mb": 32768,
-    "ollama_url": "http://localhost:11434",
-})
-hw.probe()
-router = router_for_setup("local_b580", hardware=hw)
-```
-
-### Providers
-
-| Provider | Auth |
-|---|---|
-| Anthropic | `ANTHROPIC_API_KEY` |
-| OpenRouter | `OPENROUTER_API_KEY` |
-| GitHub Copilot SDK | `gh auth login` or `GITHUB_TOKEN` |
-| GitHub Models | `GITHUB_TOKEN` |
-| Ollama / llama.cpp | none |
-
-### Dynamic levers
-
-```python
-router.prefer_local = False
-router.budget = "medium"
-# Changes take effect next run. No restart needed.
-```
+Without clubrouter, only `compress_context` is available. Routing tools
+return a setup hint if not configured.
 
 ## When to use what
 
 | Situation | Tool |
 |---|---|
-| Sending large files to model | Compress first with `stub_functions` |
-| "Build me X" from a sentence | Dev loop with `run()` |
-| Have local GPU, want to use it | Route with local preset |
-| Want cheapest possible runs | Route with `budget="free"` |
-| All of the above | They compose — compress feeds into dev loop which uses routing |
+| Sending large files to model | `compress_context` |
+| Picking the right model for a task | `pick_model` (requires clubrouter) |
+| Comparing costs across models | `estimate_cost` (requires clubrouter) |
+| Building code from a spec | [clubrouter dev loop](https://clubrouter.com) |
 
 ## Install
 
 ```bash
-pip install codeclub          # everything
-pip install codeclub-compress # compression only
-pip install codeclub-dev      # dev loop only
-pip install codeclub-infra    # routing only
+pip install codeclub                    # Python library
+npm install @codeclub/mcp-server        # TypeScript MCP server
 ```
