@@ -201,6 +201,7 @@ For model routing, dev loops, and efficiency maps: [clubrouter.com](https://club
 - [Caveman](https://github.com/juliusbrussee/caveman) — the original insight: you don't need frontier models
 - [arXiv:2601.19929](https://arxiv.org/abs/2601.19929) — Stingy Context / TREEFRAG structural compression
 - [arXiv:2307.15337](https://arxiv.org/abs/2307.15337) — Skeleton-of-Thought: Prompting LLMs for Efficient Parallel Generation
+- [Compressor maps](https://en.wikipedia.org/wiki/Compressor_map) — the analogy behind efficiency maps
 
 ---
 
